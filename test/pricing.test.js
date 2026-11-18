@@ -170,3 +170,36 @@ test('demo defaults land in ballpark ranges', () => {
   const exteriorJob = dflt({ exterior: { wallArea: 110, otherArea: 0, trimLength: 45, doors: 2, windows: 8, storeys: 1 }, coats: 2 })
   assert.ok(exteriorJob.total > 4500 && exteriorJob.total < 12000, `exterior was ${exteriorJob.total}`)
 })
+
+// ---- services ----
+const base = () => ({ rates: DEFAULT_RATES, organization: org, paint: resolvePaint(DEFAULT_PRODUCTS.map((p, i) => ({ ...p, id: 'p' + i }))) })
+
+test('disabled built-in service is left out of the quote', () => {
+  const job = { rooms: [roomFromPreset(ROOM_PRESETS.find((p) => p.id === 'bed'))], coats: 2 }
+  const all = calculateQuote({ ...base(), job })
+  const noCeil = calculateQuote({ ...base(), job, enabled: { ceiling: false } })
+  assert.ok(noCeil.total < all.total)
+  assert.equal(noCeil.quantities.interior.ceilingArea, 0)
+})
+
+test('custom services: per-sqm painted service adds labour and paint', () => {
+  const services = P.defaultServices().map((s) => (s.id === 'fence' ? { ...s, enabled: true } : s))
+  const q = calculateQuote({ ...base(), services, job: { custom: [{ service_id: 'fence', qty: 30 }], coats: 2 } })
+  assert.equal(q.customLines[0].amount, 30 * 14 * 2)
+  assert.ok(q.paintCost > 0)
+  assert.ok(q.total > 0)
+  assert.ok(describeScope({ job: {}, quantities: q.quantities }).some((l) => l.includes('Fences: 30 sqm')))
+})
+
+test('custom services: hourly, fixed, minimum charge, not per coat', () => {
+  const services = P.defaultServices().map((s) => ['plaster', 'pressure_wash'].includes(s.id) ? { ...s, enabled: true } : s)
+  const q = calculateQuote({ ...base(), services, job: { custom: [{ service_id: 'plaster', qty: 3 }, { service_id: 'pressure_wash', qty: 10 }], coats: 3 } })
+  assert.equal(q.customLines[0].amount, 225) // 3h x $75, coats ignored
+  assert.equal(q.customLines[1].amount, 150) // 10sqm x $4 = $40 -> min $150
+  assert.equal(q.paintCost, 0)
+})
+
+test('services that are switched off are ignored', () => {
+  const q = calculateQuote({ ...base(), services: P.defaultServices(), job: { custom: [{ service_id: 'fence', qty: 30 }] } })
+  assert.equal(q.total, 0)
+})

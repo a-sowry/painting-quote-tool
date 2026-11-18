@@ -97,6 +97,46 @@ const EXTRA_KINDS = [
   { id: 'ext_window', label: 'Exterior windows', side: 'exterior', measure: 'count', fields: ['How many'] },
 ]
 
+
+// ---- Services -----------------------------------------------------------------------------
+// A painter's own list of what they offer. Built-in services drive the room/exterior maths
+// (rateKey = the key in rates); custom ones are priced as simple qty x rate lines.
+// unit: sqm | m | each | hour | fixed. paint: null, or a PAINT_CATEGORIES id (sqm only).
+const UNITS = [
+  { id: 'sqm', label: 'per sqm', short: 'sqm' },
+  { id: 'm', label: 'per metre', short: 'm' },
+  { id: 'each', label: 'each', short: '' },
+  { id: 'hour', label: 'per hour', short: 'hrs' },
+  { id: 'fixed', label: 'fixed price', short: '' },
+]
+const BUILTIN_SERVICES = [
+  { id: 'interior_wall', group: 'interior', name: 'Interior walls', unit: 'sqm', rateKey: 'interior_wall_rate', builtin: true },
+  { id: 'ceiling', group: 'interior', name: 'Ceilings', unit: 'sqm', rateKey: 'ceiling_rate', builtin: true },
+  { id: 'trim', group: 'interior', name: 'Skirting & trim', unit: 'm', rateKey: 'trim_rate', builtin: true },
+  { id: 'door', group: 'interior', name: 'Interior doors', unit: 'each', rateKey: 'door_rate', builtin: true },
+  { id: 'window', group: 'interior', name: 'Interior window frames', unit: 'each', rateKey: 'window_rate', builtin: true },
+  { id: 'ext_wall', group: 'exterior', name: 'Exterior walls', unit: 'sqm', rateKey: 'exterior_wall_rate', builtin: true },
+  { id: 'ext_trim', group: 'exterior', name: 'Eaves, fascia & gutters', unit: 'm', rateKey: 'exterior_trim_rate', builtin: true },
+  { id: 'ext_door', group: 'exterior', name: 'Exterior doors', unit: 'each', rateKey: 'exterior_door_rate', builtin: true },
+  { id: 'ext_window', group: 'exterior', name: 'Exterior windows', unit: 'each', rateKey: 'exterior_window_rate', builtin: true },
+]
+// Optional extras a painter can switch on. Ballpark Australian rates (ex GST, labour only).
+const STARTER_SERVICES = [
+  { id: 'fence', group: 'other', name: 'Fences', unit: 'sqm', rate: 14, paint: 'exterior', per_coat: true, min_charge: 0 },
+  { id: 'deck', group: 'other', name: 'Decks (stain / paint)', unit: 'sqm', rate: 22, paint: 'exterior', per_coat: true, min_charge: 0 },
+  { id: 'roof', group: 'other', name: 'Roof painting', unit: 'sqm', rate: 16, paint: 'exterior', per_coat: true, min_charge: 0 },
+  { id: 'garage_door', group: 'other', name: 'Garage door', unit: 'each', rate: 180, paint: null, per_coat: false, min_charge: 0 },
+  { id: 'cabinets', group: 'other', name: 'Kitchen cupboards (per door)', unit: 'each', rate: 55, paint: null, per_coat: false, min_charge: 0 },
+  { id: 'pressure_wash', group: 'other', name: 'Pressure washing', unit: 'sqm', rate: 4, paint: null, per_coat: false, min_charge: 150 },
+  { id: 'wallpaper', group: 'other', name: 'Wallpaper removal', unit: 'sqm', rate: 12, paint: null, per_coat: false, min_charge: 0 },
+  { id: 'plaster', group: 'other', name: 'Plaster repairs', unit: 'hour', rate: 75, paint: null, per_coat: false, min_charge: 0 },
+  { id: 'labour', group: 'other', name: 'General labour', unit: 'hour', rate: 70, paint: null, per_coat: false, min_charge: 0 },
+]
+function defaultServices() {
+  return BUILTIN_SERVICES.map((s) => ({ ...s, enabled: true }))
+    .concat(STARTER_SERVICES.map((s) => ({ ...s, enabled: false })))
+}
+
 const num = (v) => Math.max(0, Number(v) || 0)
 const round2 = (n) => Math.round(n * 100) / 100
 const round1 = (n) => Math.round(n * 10) / 10
@@ -205,7 +245,7 @@ function resolvePaint(products = [], selection = {}) {
  *   }
  * }} input
  */
-function calculateQuote({ rates, organization, job, paint }) {
+function calculateQuote({ rates, organization, job, paint, services, enabled }) {
   const r = { ...DEFAULT_RATES, ...rates }
   const products = paint ?? resolvePaint([])
   const coats = Math.max(1, Math.floor(num(job.coats) || 2))
@@ -214,6 +254,7 @@ function calculateQuote({ rates, organization, job, paint }) {
   const extras = job.extras ?? []
   const ext = job.exterior ?? null
   const equipment = (job.equipment ?? []).filter((e) => num(e.cost) > 0)
+  const on = (k) => !enabled || enabled[k] !== false
 
   // --- Quantities ---
   const interior = rooms.reduce(
@@ -249,6 +290,17 @@ function calculateQuote({ rates, organization, job, paint }) {
     else if (kind === 'door' || kind === 'ext_door') t.doors += m.count
     else if (kind === 'window' || kind === 'ext_window') t.windows += m.count
   }
+
+  // Services the painter doesn't offer are left out of the quote entirely.
+  if (!on('interior_wall')) interior.wallArea = 0
+  if (!on('ceiling')) interior.ceilingArea = 0
+  if (!on('trim')) interior.trimLength = 0
+  if (!on('door')) interior.doors = 0
+  if (!on('window')) interior.windows = 0
+  if (!on('ext_wall')) exterior.wallArea = 0
+  if (!on('ext_trim')) exterior.trimLength = 0
+  if (!on('ext_door')) exterior.doors = 0
+  if (!on('ext_window')) exterior.windows = 0
 
   const storeys = Number(ext?.storeys) || 1
   const storeyFactor = storeys >= 3 ? r.storey_3_factor : storeys === 2 ? r.storey_2_factor : 1
@@ -298,6 +350,20 @@ function calculateQuote({ rates, organization, job, paint }) {
     })
   }
 
+  // Custom services: qty x rate (x coats if it's painted per coat), plus paint for sqm services that use paint.
+  const customLines = []
+  for (const c of job.custom ?? []) {
+    const svc = (services ?? []).find((x) => x.id === c.service_id)
+    const qty = num(c.qty)
+    if (!svc || svc.enabled === false || qty <= 0) continue
+    const passes = svc.per_coat ? coats : 1
+    let cost = svc.unit === 'fixed' ? num(svc.rate) : qty * num(svc.rate) * passes
+    if (num(svc.min_charge) > 0) cost = Math.max(num(svc.min_charge), cost)
+    customLines.push({ label: svc.name, qty, unit: svc.unit, amount: round2(cost) })
+    if (svc.paint && svc.unit === 'sqm') coverage.push({ category: svc.paint, area: qty, passes: coats })
+  }
+  const customCost = customLines.reduce((t, l) => t + l.amount, 0)
+
   const paintLines = coverage
     .filter((c) => c.area > 0)
     .map((c) => {
@@ -315,7 +381,7 @@ function calculateQuote({ rates, organization, job, paint }) {
   const equipmentCost = equipment.reduce((t, e) => t + num(e.cost), 0)
 
   // --- Totals ---
-  const subtotal = labourCost + materialsCost + equipmentCost
+  const subtotal = labourCost + customCost + materialsCost + equipmentCost
   const margin = subtotal * organization.margin_rate
   const preGst = subtotal + margin
   const gst = preGst * organization.gst_rate
@@ -332,6 +398,8 @@ function calculateQuote({ rates, organization, job, paint }) {
     consumablesCost: round2(consumablesCost),
     materialsCost: round2(materialsCost),
     equipmentCost: round2(equipmentCost),
+    customLines,
+    customCost: round2(customCost),
     subtotal: round2(subtotal),
     margin: round2(margin),
     preGst: round2(preGst),
@@ -342,6 +410,7 @@ function calculateQuote({ rates, organization, job, paint }) {
       exterior: roundObj(exterior),
       coats,
       primer,
+      custom: customLines.map((l) => ({ label: l.label, qty: l.qty, unit: l.unit })),
     },
   }
 }
@@ -390,6 +459,10 @@ function describeScope({ job, quantities }) {
     const more = extraLabels('exterior')
     if (more.length) lines.push(`Also includes: ${more.join(', ')}`)
   }
+  for (const c of q.custom ?? []) {
+    const u = UNITS.find((x) => x.id === c.unit)
+    lines.push(`${c.label}${c.unit === 'fixed' ? '' : ': ' + c.qty + (u && u.short ? ' ' + u.short : '')}`)
+  }
   lines.push(`${q.coats} finish coat${q.coats === 1 ? '' : 's'}${q.primer ? ' over a primer coat' : ''}`)
   if (job.condition === 'fair') lines.push('Includes patching and sanding of surfaces')
   if (job.condition === 'poor') lines.push('Includes extensive surface repair and preparation')
@@ -436,5 +509,5 @@ function roomFromPreset(preset, height = 2.4) {
   }
 }
 
-return { DEFAULT_RATES, PAINT_CATEGORIES, DEFAULT_PRODUCTS, DOOR_OPENING_M2, WINDOW_OPENING_M2, DOOR_WIDTH_M, TRIM_WIDTH_M, DOOR_PAINT_M2, WINDOW_PAINT_M2, WASTAGE, CONDITIONS, STOREYS, EXTRA_KINDS, emptyRoom, emptyExterior, emptyExtra, measureExtra, measureRoom, productCostPerLitre, resolvePaint, calculateQuote, describeScope, hasEstimates, ROOM_PRESETS, CEILING_HEIGHTS, roomFromPreset }
+return { UNITS, BUILTIN_SERVICES, STARTER_SERVICES, defaultServices, DEFAULT_RATES, PAINT_CATEGORIES, DEFAULT_PRODUCTS, DOOR_OPENING_M2, WINDOW_OPENING_M2, DOOR_WIDTH_M, TRIM_WIDTH_M, DOOR_PAINT_M2, WINDOW_PAINT_M2, WASTAGE, CONDITIONS, STOREYS, EXTRA_KINDS, emptyRoom, emptyExterior, emptyExtra, measureExtra, measureRoom, productCostPerLitre, resolvePaint, calculateQuote, describeScope, hasEstimates, ROOM_PRESETS, CEILING_HEIGHTS, roomFromPreset }
 })

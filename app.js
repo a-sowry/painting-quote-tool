@@ -24,6 +24,8 @@
       org: { name: 'Your Painting Co', abn: '', phone: '', email: '', margin_rate: 0.25, gst_rate: 0.1, quote_prefix: 'Q', next_number: 1001, valid_days: 30 },
       rates: Object.assign({}, P.DEFAULT_RATES),
       products: P.DEFAULT_PRODUCTS.map(function (p) { return Object.assign({ id: uid() }, p) }),
+      services: P.defaultServices(),
+      onboarded: false,
       quotes: [],
       draft: newDraft()
     }
@@ -31,7 +33,7 @@
   function newDraft() {
     return {
       id: uid(), customer: { name: '', address: '', phone: '', email: '' },
-      job: { rooms: [], extras: [], exterior: null, coats: 2, primer: false, condition: 'good', equipment: [] },
+      job: { rooms: [], extras: [], custom: [], exterior: null, coats: 2, primer: false, condition: 'good', equipment: [] },
       selection: {}, notes: '', height: 2.4
     }
   }
@@ -40,13 +42,32 @@
   state.rates = Object.assign({}, P.DEFAULT_RATES, state.rates)
   state.org = Object.assign(defaults().org, state.org)
   if (!state.draft) state.draft = newDraft()
-  var tab = 'quote'
+  if (!state.draft.job.custom) state.draft.job.custom = []
+  if (!state.services) state.services = P.defaultServices()
+  if (state.onboarded === undefined) state.onboarded = false
+  var obStep = 1
+  var tab = state.onboarded ? 'quote' : 'onboard'
+
+  // ---------- services ----------
+  function enabledMap() { var m = {}; state.services.forEach(function (s) { if (s.builtin) m[s.id] = s.enabled !== false }); return m }
+  function svcOn(id) { var s = state.services.filter(function (x) { return x.id === id })[0]; return !s || s.enabled !== false }
+  function unitLabel(u) { return P.UNITS.filter(function (x) { return x.id === u })[0].label }
+  function unitShort(u) { return { sqm: 'sqm', m: 'metres', each: 'how many', hour: 'hours', fixed: '' }[u] }
+  function newId() { return 'c' + uid() }
+  function catVisible(c) {
+    if (c === 'interior_wall') return svcOn('interior_wall')
+    if (c === 'ceiling') return svcOn('ceiling')
+    if (c === 'trim') return svcOn('trim') || svcOn('door') || svcOn('window') || svcOn('ext_trim') || svcOn('ext_door') || svcOn('ext_window')
+    if (c === 'exterior') return svcOn('ext_wall') || state.services.some(function (s) { return !s.builtin && s.enabled && s.paint === 'exterior' })
+    return true
+  }
+  var EXTRA_SVC = { wall: 'interior_wall', ceiling: 'ceiling', trim: 'trim', door: 'door', window: 'window', ext_wall: 'ext_wall', ext_trim: 'ext_trim', ext_door: 'ext_door', ext_window: 'ext_window' }
 
   // ---------- calculation ----------
   function calc(d) {
     d = d || state.draft
     var paint = P.resolvePaint(state.products, d.selection)
-    return P.calculateQuote({ rates: state.rates, organization: state.org, job: d.job, paint: paint })
+    return P.calculateQuote({ rates: state.rates, organization: state.org, job: d.job, paint: paint, services: state.services, enabled: enabledMap() })
   }
 
   // ---------- render ----------
@@ -54,7 +75,9 @@
     $('#nav').querySelectorAll('button').forEach(function (b) { b.classList.toggle('on', b.dataset.tab === tab) })
     var app = $('#app')
     var y = window.scrollY
-    if (tab === 'quote') app.innerHTML = viewQuote()
+    $('.top nav').style.display = tab === 'onboard' ? 'none' : ''
+    if (tab === 'onboard') app.innerHTML = viewOnboard()
+    else if (tab === 'quote') app.innerHTML = viewQuote()
     else if (tab === 'history') app.innerHTML = viewHistory()
     else app.innerHTML = viewPrices()
     if (tab === 'quote') renderBar(); else removeBar()
@@ -89,17 +112,20 @@
     j.rooms.forEach(function (r, i) { h += roomCard(r, i) })
     h += '</div></div>'
 
-    // other surfaces
-    h += '<div class="card"><h2>Other surfaces</h2><p class="note" style="margin:0 0 8px">Feature walls, extra ceilings, doors, fences, eaves &mdash; anything not in a room above.</p>'
-    h += '<div class="row"><div style="flex:2 1 220px"><label>Add</label><select id="extraKind">'
-    P.EXTRA_KINDS.forEach(function (k) { h += '<option value="' + k.id + '">' + esc(k.label) + '</option>' })
-    h += '</select></div><div style="flex:0 0 auto"><button class="btn sec" data-act="addextra">Add</button></div></div>'
+    // other work: extra surfaces + the painter's own services
+    var opts = ''
+    P.EXTRA_KINDS.forEach(function (k) { if (svcOn(EXTRA_SVC[k.id])) opts += '<option value="x:' + k.id + '">' + esc(k.label) + '</option>' })
+    state.services.forEach(function (sv) { if (!sv.builtin && sv.enabled) opts += '<option value="s:' + sv.id + '">' + esc(sv.name) + ' (' + unitLabel(sv.unit) + ')</option>' })
+    h += '<div class="card"><h2>Other work</h2><p class="note" style="margin:0 0 8px">Feature walls, extra ceilings, fences, repairs &mdash; anything not in a room above.</p>'
+    h += '<div class="row"><div style="flex:2 1 220px"><label>Add</label><select id="extraKind">' + opts + '</select></div><div style="flex:0 0 auto"><button class="btn sec" data-act="addextra">Add</button></div></div>'
     j.extras.forEach(function (x, i) { h += extraCard(x, i) })
+    j.custom.forEach(function (c, i) { h += customCard(c, i) })
     h += '</div>'
 
     // exterior
-    h += '<div class="card"><h2>Exterior</h2>'
-    if (!j.exterior) {
+    var extOn = svcOn('ext_wall') || svcOn('ext_trim') || svcOn('ext_door') || svcOn('ext_window')
+    if (extOn) h += '<div class="card"><h2>Exterior</h2>'
+    if (!extOn) {} else if (!j.exterior) {
       h += '<button class="btn sec" data-act="addext">+ Add exterior painting</button>'
     } else {
       var e = j.exterior
@@ -114,7 +140,7 @@
       if (e.source !== 'measured') h += '<div class="sum"><span class="tag">estimated size</span></div>'
       h += '<div style="margin-top:8px"><button class="link red" data-act="rmext">Remove exterior</button></div>'
     }
-    h += '</div>'
+    if (extOn) h += '</div>'
 
     // job options
     h += '<div class="card"><h2>Job options</h2><div class="row">'
@@ -127,7 +153,7 @@
     h += '<h3>Paint</h3>'
     P.PAINT_CATEGORIES.forEach(function (c) {
       var list = state.products.filter(function (p) { return p.category === c.id })
-      if (!list.length) return
+      if (!list.length || !catVisible(c.id)) return
       var cur = P.resolvePaint(state.products, d.selection)[c.id]
       h += '<div class="row" style="margin-bottom:6px"><div><label>' + esc(c.label) + '</label><select data-sel="' + c.id + '">'
       list.forEach(function (p) { h += '<option value="' + p.id + '"' + (cur && cur.id === p.id ? ' selected' : '') + '>' + esc(p.name) + ' &mdash; ' + money(p.pack_price) + ' / ' + p.pack_size_l + 'L</option>' })
@@ -158,16 +184,17 @@
     h += '<div class="row" style="margin-top:8px"><div><label>Doors</label>' + num(1) + 'data-f="job.rooms.' + i + '.doors" data-room="1" value="' + esc(r.doors) + '"></div>'
     h += '<div><label>Windows</label>' + num(1) + 'data-f="job.rooms.' + i + '.windows" data-room="1" value="' + esc(r.windows) + '"></div></div>'
     h += '<div class="row" style="margin-top:8px;gap:12px">'
-    ;[['ceiling', 'Ceiling'], ['trim', 'Skirting'], ['paintDoors', 'Doors'], ['paintWindows', 'Window frames']].forEach(function (c) {
+    ;[['ceiling', 'Ceiling', 'ceiling'], ['trim', 'Skirting', 'trim'], ['paintDoors', 'Doors', 'door'], ['paintWindows', 'Window frames', 'window']].filter(function (c) { return svcOn(c[2]) }).forEach(function (c) {
       h += '<label class="chk"><input type="checkbox" data-f="job.rooms.' + i + '.' + c[0] + '" data-bool="1"' + (r[c[0]] ? ' checked' : '') + '> ' + c[1] + '</label>'
     })
     h += '</div><div class="sum" id="rs' + i + '">' + roomSummary(m) + '</div></div>'
     return h
   }
   function roomSummary(m) {
-    var p = [Math.round(m.wallArea) + ' sqm walls']
-    if (m.ceilingArea) p.push(Math.round(m.ceilingArea) + ' sqm ceiling')
-    if (m.trimLength) p.push(Math.round(m.trimLength) + ' m skirting')
+    var p = []
+    if (svcOn('interior_wall')) p.push(Math.round(m.wallArea) + ' sqm walls')
+    if (m.ceilingArea && svcOn('ceiling')) p.push(Math.round(m.ceilingArea) + ' sqm ceiling')
+    if (m.trimLength && svcOn('trim')) p.push(Math.round(m.trimLength) + ' m skirting')
     return p.join(' · ')
   }
 
@@ -183,12 +210,21 @@
     return h
   }
 
+  function customCard(c, i) {
+    var sv = state.services.filter(function (x) { return x.id === c.service_id })[0]
+    if (!sv) return ''
+    var h = '<div class="room"><div class="head"><b style="flex:1">' + esc(sv.name) + '</b><button class="link red" data-act="rmcustom" data-i="' + i + '">&times;</button></div>'
+    if (sv.unit === 'fixed') return h + '<div class="note">Fixed price ' + money(sv.rate) + '</div></div>'
+    return h + '<div class="row"><div><label>' + esc(unitShort(sv.unit)) + '</label>' + num(sv.unit === 'each' ? 1 : 'any') + 'data-f="job.custom.' + i + '.qty" value="' + esc(c.qty) + '"></div></div></div>'
+  }
+
   function breakdown() {
     var q = calc(), d = state.draft
     var h = '<h2>Price breakdown <span class="note">(only you see this)</span></h2>'
     if (q.total === 0) return h + '<div class="empty">Add a room to see the price.</div>'
     h += '<table>'
     q.labourLines.forEach(function (l) { h += '<tr><td>' + esc(l.label) + '</td><td class="r">' + money(l.amount) + '</td></tr>' })
+    q.customLines.forEach(function (l) { h += '<tr><td>' + esc(l.label) + ' <span class="note">' + l.qty + ' ' + esc(l.unit) + '</span></td><td class="r">' + money(l.amount) + '</td></tr>' })
     h += '<tr><td><b>Labour</b>' + (q.conditionFactor > 1 ? ' <span class="note">(incl. prep x' + q.conditionFactor + ')</span>' : '') + '</td><td class="r"><b>' + money(q.labourCost) + '</b></td></tr>'
     q.paintLines.forEach(function (l) { h += '<tr><td>' + esc(l.label) + ' <span class="note">' + l.litres + ' L (' + l.packs + ' x ' + l.packSize + 'L)</span></td><td class="r">' + money(l.cost) + '</td></tr>' })
     h += '<tr><td>Consumables (tape, sheets, filler)</td><td class="r">' + money(q.consumablesCost) + '</td></tr>'
@@ -245,9 +281,17 @@
     h += '<div class="card"><h2>Your business</h2><div class="row"><div style="flex:2 1 200px"><label>Business name</label><input data-f="org.name" value="' + esc(state.org.name) + '"></div><div><label>ABN</label><input data-f="org.abn" value="' + esc(state.org.abn) + '"></div></div>'
     h += '<div class="row" style="margin-top:8px"><div><label>Phone</label><input data-f="org.phone" value="' + esc(state.org.phone) + '"></div><div><label>Email</label><input data-f="org.email" value="' + esc(state.org.email) + '"></div></div>'
     h += '<div class="row" style="margin-top:8px"><div><label>Margin (%)</label>' + num() + 'data-f="org.margin_rate" data-pct="1" value="' + Math.round(state.org.margin_rate * 1000) / 10 + '"></div><div><label>GST (%)</label>' + num() + 'data-f="org.gst_rate" data-pct="1" value="' + Math.round(state.org.gst_rate * 1000) / 10 + '"></div><div><label>Quote valid (days)</label>' + num(1) + 'data-f="org.valid_days" value="' + esc(state.org.valid_days) + '"></div></div></div>'
-    h += '<div class="card"><h2>Labour rates</h2>'
+    h += '<div class="card"><h2>My services</h2><p class="note" style="margin:0 0 8px">Tick what you offer and set your rate. Only ticked services appear when you quote.</p>'
+    state.services.forEach(function (sv, i) {
+      h += '<div class="room"><label class="chk" style="font-weight:600"><input type="checkbox" data-f="services.' + i + '.enabled" data-bool="1" data-rerender="1"' + (sv.enabled !== false ? ' checked' : '') + '> ' + esc(sv.name) + '</label>'
+      if (sv.enabled !== false) h += svcForm(sv, i)
+      h += '</div>'
+    })
+    h += '<button class="btn sec sm" style="margin-top:8px" data-act="addsvc">+ Add my own service</button></div>'
+    h += '<div class="card"><h2>Job modifiers</h2>'
     RATE_LABELS.forEach(function (r) {
-      if (r[1] === null) { h += '<h3>' + esc(r[0]) + '</h3>'; return }
+      if (r[1] === null) return
+      if (!/primer|condition|storey|min_charge|consumables/.test(r[0])) return
       h += '<div class="row" style="margin-bottom:6px;align-items:center"><div style="flex:2 1 170px">' + esc(r[1]) + '</div><div style="flex:0 0 110px">' + num() + 'data-f="rates.' + r[0] + '" value="' + esc(state.rates[r[0]]) + '"></div></div>'
     })
     h += '<div style="margin-top:8px"><label class="chk"><input type="checkbox" data-f="rates.round_paint_to_tins" data-bool="1"' + (state.rates.round_paint_to_tins ? ' checked' : '') + '> Charge whole tins (not just litres used)</label></div></div>'
@@ -266,6 +310,60 @@
     })
     h += '</div><div class="card"><button class="btn sec" data-act="reset">Reset everything to demo defaults</button></div>'
     return h
+  }
+
+  function svcForm(sv, i) {
+    var h = ''
+    if (sv.builtin) {
+      h += '<div class="row" style="margin-top:8px;align-items:center"><div style="flex:2 1 150px" class="note">Your rate (' + esc(unitLabel(sv.unit)) + ', per coat)</div><div style="flex:0 0 110px">' + num() + 'data-f="rates.' + sv.rateKey + '" value="' + esc(state.rates[sv.rateKey]) + '"></div></div>'
+      return h
+    }
+    h += '<div class="row" style="margin-top:8px"><div style="flex:2 1 160px"><label>Service name</label><input data-f="services.' + i + '.name" value="' + esc(sv.name) + '"></div>'
+    h += '<div><label>Priced</label><select data-f="services.' + i + '.unit" data-rerender="1">'
+    P.UNITS.forEach(function (u) { h += '<option value="' + u.id + '"' + (sv.unit === u.id ? ' selected' : '') + '>' + esc(u.label) + '</option>' })
+    h += '</select></div><div><label>' + (sv.unit === 'fixed' ? 'Price ($)' : 'Your rate ($ ' + esc(unitLabel(sv.unit)) + ')') + '</label>' + num() + 'data-f="services.' + i + '.rate" value="' + esc(sv.rate) + '"></div></div>'
+    h += '<div class="row" style="margin-top:8px"><div><label>Minimum charge ($)</label>' + num() + 'data-f="services.' + i + '.min_charge" value="' + esc(sv.min_charge) + '"></div>'
+    if (sv.unit === 'sqm') {
+      h += '<div><label>Uses paint</label><select data-f="services.' + i + '.paint" data-rerender="1"><option value="">No paint</option>'
+      P.PAINT_CATEGORIES.forEach(function (c) { h += '<option value="' + c.id + '"' + (sv.paint === c.id ? ' selected' : '') + '>' + esc(c.label) + '</option>' })
+      h += '</select></div>'
+    }
+    h += '</div>'
+    if (sv.unit !== 'fixed' && sv.unit !== 'hour') h += '<div style="margin-top:8px"><label class="chk"><input type="checkbox" data-f="services.' + i + '.per_coat" data-bool="1"' + (sv.per_coat ? ' checked' : '') + '> Rate is per coat (multiplied by number of coats)</label></div>'
+    h += '<div style="margin-top:6px"><button class="link red" data-act="rmsvc" data-i="' + i + '">Remove this service</button></div>'
+    return h
+  }
+
+  function viewOnboard() {
+    var h = '<div class="card"><div class="note">Step ' + obStep + ' of 3</div>'
+    if (obStep === 1) {
+      h += '<h2>Welcome &mdash; set up your business</h2><div class="row"><div style="flex:2 1 200px"><label>Business name</label><input data-f="org.name" value="' + esc(state.org.name) + '"></div></div>'
+      h += '<div class="row" style="margin-top:8px"><div><label>Phone</label><input data-f="org.phone" value="' + esc(state.org.phone) + '"></div><div><label>Email</label><input data-f="org.email" value="' + esc(state.org.email) + '"></div></div>'
+      h += '<div class="row" style="margin-top:8px"><div><label>Profit margin (%)</label>' + num() + 'data-f="org.margin_rate" data-pct="1" value="' + Math.round(state.org.margin_rate * 1000) / 10 + '"></div><div><label>GST (%)</label>' + num() + 'data-f="org.gst_rate" data-pct="1" value="' + Math.round(state.org.gst_rate * 1000) / 10 + '"></div></div>'
+    } else if (obStep === 2) {
+      h += '<h2>What services do you offer?</h2><p class="note">Tick everything you do. You can add your own at the bottom, and change this any time.</p>'
+      ;[['interior', 'Interior'], ['exterior', 'Exterior'], ['other', 'Other work']].forEach(function (g) {
+        h += '<h3>' + g[1] + '</h3>'
+        state.services.forEach(function (sv, i) {
+          if (sv.group !== g[0]) return
+          h += '<div style="margin:6px 0"><label class="chk"><input type="checkbox" data-f="services.' + i + '.enabled" data-bool="1"' + (sv.enabled !== false ? ' checked' : '') + '> ' + esc(sv.name) + '</label></div>'
+        })
+      })
+      h += '<button class="btn sec sm" style="margin-top:10px" data-act="addsvc">+ Add my own service</button>'
+    } else {
+      h += '<h2>Set your prices</h2><p class="note">Starting figures are typical Australian rates &mdash; change them to yours. Labour only; paint is priced separately.</p>'
+      var any = false
+      state.services.forEach(function (sv, i) {
+        if (sv.enabled === false) return
+        any = true
+        h += '<div class="room"><b>' + esc(sv.name) + '</b>' + svcForm(sv, i) + '</div>'
+      })
+      if (!any) h += '<div class="empty">No services ticked. Go back and tick at least one.</div>'
+    }
+    h += '<div class="row" style="margin-top:14px">'
+    if (obStep > 1) h += '<button class="btn sec" data-act="obback">Back</button>'
+    h += obStep < 3 ? '<button class="btn" data-act="obnext">Next</button>' : '<button class="btn acc" data-act="obfinish">Start quoting</button>'
+    return h + '</div></div>'
   }
 
   // ---------- events ----------
@@ -297,7 +395,7 @@
     if (!f || el.type === 'radio') return
     var v = fieldVal(el)
     if (el.dataset.pct) v = (Number(el.value) || 0) / 100
-    var path = /^(org|rates|products)\./.test(f) ? f : 'draft.' + f
+    var path = /^(org|rates|products|services)\./.test(f) ? f : 'draft.' + f
     var realPath = path.replace(/^draft\.(customer|notes|height)/, 'draft.$1')
     setPath(realPath, v)
     var changed = (el.dataset.room || el.dataset.clr) ? confirmSource(realPath.replace(/^draft\./, '')) : false
@@ -314,8 +412,9 @@
       state.products.forEach(function (p) { if (p.category === cat) p.is_default = false })
       state.products[i].is_default = true; save(); return
     }
+    if (el.dataset.rerender) { var y2 = window.scrollY; save(); render(); window.scrollTo(0, y2); return }
     // selects & checkboxes re-render the quote so summaries/paint lists stay right
-    if (tab === 'quote' && (el.tagName === 'SELECT' || el.type === 'checkbox')) { setTimeout(render, 0) }
+    if (tab === 'quote' && (el.dataset.f || el.dataset.sel) && (el.tagName === 'SELECT' || el.type === 'checkbox')) { setTimeout(render, 0) }
   })
 
   document.addEventListener('click', function (e) {
@@ -330,7 +429,18 @@
     } else if (act === 'addblank') { var r = P.emptyRoom('Room ' + (j.rooms.length + 1)); r.height = Number(d.height) || 2.4; j.rooms.push(r) }
     else if (act === 'dup') { var c = JSON.parse(JSON.stringify(j.rooms[i])); c.name += ' (copy)'; j.rooms.splice(i + 1, 0, c) }
     else if (act === 'rmroom') j.rooms.splice(i, 1)
-    else if (act === 'addextra') { j.extras.push(P.emptyExtra($('#extraKind').value, Number(d.height) || 2.4)) }
+    else if (act === 'addextra') {
+      var ev = $('#extraKind').value
+      if (!ev) { alert('Switch on some services under Prices first.'); return }
+      if (ev.indexOf('x:') === 0) j.extras.push(P.emptyExtra(ev.slice(2), Number(d.height) || 2.4))
+      else { var sv0 = state.services.filter(function (x) { return x.id === ev.slice(2) })[0]; j.custom.push({ service_id: sv0.id, qty: sv0.unit === 'fixed' ? 1 : '' }) }
+    }
+    else if (act === 'rmcustom') j.custom.splice(i, 1)
+    else if (act === 'addsvc') { state.services.push({ id: newId(), group: 'other', name: 'New service', unit: 'sqm', rate: 20, paint: null, per_coat: false, min_charge: 0, enabled: true }) }
+    else if (act === 'rmsvc') { j.custom = j.custom.filter(function (c) { return c.service_id !== state.services[i].id }); state.services.splice(i, 1) }
+    else if (act === 'obnext') obStep++
+    else if (act === 'obback') obStep--
+    else if (act === 'obfinish') { state.onboarded = true; tab = 'quote'; window.scrollTo(0, 0) }
     else if (act === 'rmextra') j.extras.splice(i, 1)
     else if (act === 'addext') j.exterior = P.emptyExterior()
     else if (act === 'rmext') j.exterior = null
@@ -339,11 +449,11 @@
     else if (act === 'save') return saveQuote()
     else if (act === 'pdf') return printQuote()
     else if (act === 'clear') { if (confirm('Start a new blank quote?')) state.draft = newDraft(); else return }
-    else if (act === 'openq') { state.draft = JSON.parse(JSON.stringify(state.quotes[i].draft)); tab = 'quote' }
+    else if (act === 'openq') { state.draft = JSON.parse(JSON.stringify(state.quotes[i].draft)); if (!state.draft.job.custom) state.draft.job.custom = []; tab = 'quote' }
     else if (act === 'delq') { if (confirm('Delete this saved quote?')) state.quotes.splice(i, 1); else return }
     else if (act === 'rmprod') { if (state.products.filter(function (x) { return x.category === state.products[i].category }).length > 1) { state.products.splice(i, 1) } else { alert('Keep at least one product in each group.'); return } }
     else if (act === 'addprod') { state.products.push({ id: uid(), category: b.dataset.cat, name: 'New product', pack_size_l: 10, pack_price: 100, coverage_m2_per_l: 12, is_default: false }) }
-    else if (act === 'reset') { if (confirm('Reset all prices, paint and saved quotes to the demo defaults?')) { state = defaults(); tab = 'quote' } else return }
+    else if (act === 'reset') { if (confirm('Reset all prices, paint and saved quotes to the demo defaults?')) { state = defaults(); tab = 'onboard'; obStep = 1 } else return }
     else return
     save(); render()
   })
