@@ -154,7 +154,13 @@ Deno.serve(async (req: Request) => {
   } catch {
     return json(502, { error: 'Could not reach the analysis service' })
   }
-  if (!res.ok) return json(502, { error: `Analysis service error (${res.status})` })
+  if (!res.ok) {
+    // Pass Anthropic's own reason through (e.g. low credit balance, bad model name) - it never contains the key.
+    let why = ''
+    try { why = (await res.json())?.error?.message ?? '' } catch { /* not JSON */ }
+    console.error('anthropic error', res.status, why)
+    return json(502, { error: `Analysis service error (${res.status})${why ? ': ' + String(why).slice(0, 200) : ''}` })
+  }
   const estimate = parseResponse(await res.json())
   if (!estimate) return json(502, { error: 'The analysis did not return measurements' })
   return json(200, { estimate, mode: body.mode })
