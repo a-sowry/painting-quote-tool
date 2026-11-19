@@ -39,6 +39,9 @@ const DEFAULT_RATES = {
   storey_3_factor: 1.5,
   min_charge: 300, // $ minimum labour charge per quote
   // Materials
+  // Older timber homes (Queenslanders): VJ boards, ornate trim, high ceilings
+  heritage_labour_factor: 1.3, // extra prep + detailing on all labour
+  heritage_paint_factor: 1.15, // grooved / profiled surfaces take more paint
   consumables_pct: 0.08, // tape, drop sheets, filler, sandpaper as a fraction of paint cost
   round_paint_to_tins: false, // true = charge whole tins; false = charge litres actually used
 }
@@ -125,6 +128,13 @@ const STARTER_SERVICES = [
   { id: 'fence', group: 'other', name: 'Fences', unit: 'sqm', rate: 14, paint: 'exterior', per_coat: true, min_charge: 0 },
   { id: 'deck', group: 'other', name: 'Decks (stain / paint)', unit: 'sqm', rate: 22, paint: 'exterior', per_coat: true, min_charge: 0 },
   { id: 'roof', group: 'other', name: 'Roof painting', unit: 'sqm', rate: 16, paint: 'exterior', per_coat: true, min_charge: 0 },
+  { id: 'balustrade', group: 'qld', name: 'Verandah balustrade & fretwork', unit: 'm', rate: 55, paint: 'exterior', per_coat: true, min_charge: 0 },
+  { id: 'verandah_ceiling', group: 'qld', name: 'Verandah ceiling / soffit (VJ)', unit: 'sqm', rate: 18, paint: 'exterior', per_coat: true, min_charge: 0 },
+  { id: 'lattice', group: 'qld', name: 'Lattice screens (under house)', unit: 'sqm', rate: 12, paint: 'exterior', per_coat: true, min_charge: 0 },
+  { id: 'stumps', group: 'qld', name: 'Stumps & bearers (per stump)', unit: 'each', rate: 30, paint: null, per_coat: false, min_charge: 0 },
+  { id: 'lead_test', group: 'qld', name: 'Lead paint test (pre-1970 homes)', unit: 'each', rate: 350, paint: null, per_coat: false, min_charge: 0 },
+  { id: 'lead_safe', group: 'qld', name: 'Lead-safe preparation / containment', unit: 'fixed', rate: 4500, paint: null, per_coat: false, min_charge: 0 },
+  { id: 'scaffold', group: 'qld', name: 'Scaffold / EWP for high or raised homes', unit: 'fixed', rate: 2500, paint: null, per_coat: false, min_charge: 0 },
   { id: 'garage_door', group: 'other', name: 'Garage door', unit: 'each', rate: 180, paint: null, per_coat: false, min_charge: 0 },
   { id: 'cabinets', group: 'other', name: 'Kitchen cupboards (per door)', unit: 'each', rate: 55, paint: null, per_coat: false, min_charge: 0 },
   { id: 'pressure_wash', group: 'other', name: 'Pressure washing', unit: 'sqm', rate: 4, paint: null, per_coat: false, min_charge: 150 },
@@ -325,8 +335,10 @@ function calculateQuote({ rates, organization, job, paint, services, enabled }) 
     labourLines.push(['Primer coat', onePass * r.primer_labour_factor])
   }
 
+  const heritage = Boolean(job.heritage)
   const conditionFactor =
-    job.condition === 'poor' ? r.condition_poor_factor : job.condition === 'fair' ? r.condition_fair_factor : 1
+    (job.condition === 'poor' ? r.condition_poor_factor : job.condition === 'fair' ? r.condition_fair_factor : 1) *
+    (heritage ? num(r.heritage_labour_factor) || 1 : 1)
   const labourBase = labourLines.reduce((t, [, v]) => t + v, 0)
   const labourCost = labourBase === 0 ? 0 : Math.max(r.min_charge, labourBase * conditionFactor)
 
@@ -336,16 +348,17 @@ function calculateQuote({ rates, organization, job, paint, services, enabled }) 
     (interior.doors + exterior.doors) * DOOR_PAINT_M2 +
     (interior.windows + exterior.windows) * WINDOW_PAINT_M2
 
+  const hp = heritage ? num(r.heritage_paint_factor) || 1 : 1 // grooved timber takes more paint
   const coverage = [
-    { category: 'interior_wall', area: interior.wallArea, passes: coats },
-    { category: 'ceiling', area: interior.ceilingArea, passes: coats },
-    { category: 'trim', area: trimPaintArea, passes: coats },
-    { category: 'exterior', area: exterior.wallArea, passes: coats },
+    { category: 'interior_wall', area: interior.wallArea * hp, passes: coats },
+    { category: 'ceiling', area: interior.ceilingArea * hp, passes: coats },
+    { category: 'trim', area: trimPaintArea * hp, passes: coats },
+    { category: 'exterior', area: exterior.wallArea * hp, passes: coats },
   ]
   if (primer) {
     coverage.push({
       category: 'primer',
-      area: interior.wallArea + interior.ceilingArea + exterior.wallArea,
+      area: (interior.wallArea + interior.ceilingArea + exterior.wallArea) * hp,
       passes: 1,
     })
   }
@@ -410,6 +423,7 @@ function calculateQuote({ rates, organization, job, paint, services, enabled }) 
       exterior: roundObj(exterior),
       coats,
       primer,
+      heritage,
       custom: customLines.map((l) => ({ label: l.label, qty: l.qty, unit: l.unit })),
     },
   }
@@ -464,6 +478,7 @@ function describeScope({ job, quantities }) {
     lines.push(`${c.label}${c.unit === 'fixed' ? '' : ': ' + c.qty + (u && u.short ? ' ' + u.short : '')}`)
   }
   lines.push(`${q.coats} finish coat${q.coats === 1 ? '' : 's'}${q.primer ? ' over a primer coat' : ''}`)
+  if (q.heritage) lines.push('Includes extra preparation and detailing for timber (VJ) surfaces and trim')
   if (job.condition === 'fair') lines.push('Includes patching and sanding of surfaces')
   if (job.condition === 'poor') lines.push('Includes extensive surface repair and preparation')
   return lines
@@ -495,7 +510,32 @@ const ROOM_PRESETS = [
   { id: 'entry', label: 'Entry', length: 2.5, width: 2.0, doors: 1, windows: 0 },
 ]
 
-const CEILING_HEIGHTS = [2.4, 2.55, 2.7, 3.0]
+const CEILING_HEIGHTS = [2.4, 2.55, 2.7, 3.0, 3.3, 3.6]
+
+// Whole-house starting points common in Queensland. Typical sizes only - the painter edits them.
+const HOUSE_TEMPLATES = [
+  { id: 'queenslander', label: 'Queenslander (3 bed, high ceilings)', height: 3.3, heritage: true,
+    rooms: ['master', 'bed', 'bed', 'living', 'dining', 'kitchen', 'bath', 'toilet', 'laundry', 'hall'] },
+  { id: 'lowset', label: 'Low-set brick (4 bed, 2 bath)', height: 2.4, heritage: false,
+    rooms: ['master', 'ensuite', 'bed', 'bed', 'bed', 'living', 'dining', 'kitchen', 'bath', 'toilet', 'laundry', 'hall', 'entry'] },
+  { id: 'highset', label: 'High-set post-war (3 bed)', height: 2.55, heritage: false,
+    rooms: ['master', 'bed', 'bed', 'living', 'dining', 'kitchen', 'bath', 'toilet', 'laundry', 'hall'] },
+  { id: 'townhouse', label: 'Townhouse (3 bed)', height: 2.4, heritage: false,
+    rooms: ['master', 'ensuite', 'bed', 'bed', 'living', 'kitchen', 'bath', 'toilet', 'laundry', 'hall'] },
+  { id: 'unit', label: 'Unit / apartment (2 bed)', height: 2.4, heritage: false,
+    rooms: ['master', 'bed', 'living', 'kitchen', 'bath', 'laundry'] },
+]
+function roomsFromTemplate(t) {
+  const seen = {}
+  return t.rooms.map((pid) => {
+    const p = ROOM_PRESETS.find((x) => x.id === pid)
+    seen[pid] = (seen[pid] || 0) + 1
+    const total = t.rooms.filter((x) => x === pid).length
+    const r = roomFromPreset(p, t.height)
+    if (total > 1) r.name = `${p.label} ${seen[pid]}`
+    return r
+  })
+}
 
 function roomFromPreset(preset, height = 2.4) {
   return {
@@ -509,5 +549,5 @@ function roomFromPreset(preset, height = 2.4) {
   }
 }
 
-return { UNITS, BUILTIN_SERVICES, STARTER_SERVICES, defaultServices, DEFAULT_RATES, PAINT_CATEGORIES, DEFAULT_PRODUCTS, DOOR_OPENING_M2, WINDOW_OPENING_M2, DOOR_WIDTH_M, TRIM_WIDTH_M, DOOR_PAINT_M2, WINDOW_PAINT_M2, WASTAGE, CONDITIONS, STOREYS, EXTRA_KINDS, emptyRoom, emptyExterior, emptyExtra, measureExtra, measureRoom, productCostPerLitre, resolvePaint, calculateQuote, describeScope, hasEstimates, ROOM_PRESETS, CEILING_HEIGHTS, roomFromPreset }
+return { HOUSE_TEMPLATES, roomsFromTemplate, UNITS, BUILTIN_SERVICES, STARTER_SERVICES, defaultServices, DEFAULT_RATES, PAINT_CATEGORIES, DEFAULT_PRODUCTS, DOOR_OPENING_M2, WINDOW_OPENING_M2, DOOR_WIDTH_M, TRIM_WIDTH_M, DOOR_PAINT_M2, WINDOW_PAINT_M2, WASTAGE, CONDITIONS, STOREYS, EXTRA_KINDS, emptyRoom, emptyExterior, emptyExtra, measureExtra, measureRoom, productCostPerLitre, resolvePaint, calculateQuote, describeScope, hasEstimates, ROOM_PRESETS, CEILING_HEIGHTS, roomFromPreset }
 })

@@ -203,3 +203,28 @@ test('services that are switched off are ignored', () => {
   const q = calculateQuote({ ...base(), services: P.defaultServices(), job: { custom: [{ service_id: 'fence', qty: 30 }] } })
   assert.equal(q.total, 0)
 })
+
+// ---- Queensland / older timber homes ----
+test('older timber home costs more (labour + paint) and says so on the scope', () => {
+  const q3 = P.HOUSE_TEMPLATES.find((t) => t.id === 'queenslander')
+  const rooms = P.roomsFromTemplate(q3)
+  const plain = calculateQuote({ ...base(), job: { rooms, coats: 2 } })
+  const old = calculateQuote({ ...base(), job: { rooms, coats: 2, heritage: true } })
+  assert.ok(old.labourCost > plain.labourCost * 1.25)
+  assert.ok(old.paintCost > plain.paintCost * 1.1)
+  assert.ok(describeScope({ job: { rooms }, quantities: old.quantities }).some((l) => l.includes('timber')))
+})
+test('house templates: names numbered, heights applied, all estimates', () => {
+  P.HOUSE_TEMPLATES.forEach((t) => {
+    const rooms = P.roomsFromTemplate(t)
+    assert.equal(rooms.length, t.rooms.length)
+    assert.ok(rooms.every((r) => r.source === 'estimate' && r.height === t.height))
+  })
+  const names = P.roomsFromTemplate(P.HOUSE_TEMPLATES[0]).map((r) => r.name)
+  assert.ok(names.includes('Bedroom 1') && names.includes('Bedroom 2') && names.includes('Master bedroom'))
+})
+test('Queenslander ballpark: 3-bed interior with high ceilings lands in a sane range', () => {
+  const rooms = P.roomsFromTemplate(P.HOUSE_TEMPLATES.find((t) => t.id === 'queenslander'))
+  const q = calculateQuote({ ...base(), job: { rooms, coats: 2, heritage: true } })
+  assert.ok(q.total > 7000 && q.total < 17000, 'total ' + q.total) // published Brisbane guides: ~9.5-16.5k for a 4BR interior
+})

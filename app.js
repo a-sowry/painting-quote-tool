@@ -21,7 +21,7 @@
   }
   function defaults() {
     return {
-      org: { name: 'Your Painting Co', abn: '', phone: '', email: '', margin_rate: 0.25, gst_rate: 0.1, quote_prefix: 'Q', next_number: 1001, valid_days: 30 },
+      org: { name: 'Your Painting Co', abn: '', phone: '', email: '', margin_rate: 0.25, gst_rate: 0.1, quote_prefix: 'Q', next_number: 1001, valid_days: 30, licence: '' },
       rates: Object.assign({}, P.DEFAULT_RATES),
       products: P.DEFAULT_PRODUCTS.map(function (p) { return Object.assign({ id: uid() }, p) }),
       services: P.defaultServices(),
@@ -44,6 +44,7 @@
   if (!state.draft) state.draft = newDraft()
   if (!state.draft.job.custom) state.draft.job.custom = []
   if (!state.services) state.services = P.defaultServices()
+  P.defaultServices().forEach(function (d) { if (!state.services.some(function (x) { return x.id === d.id })) state.services.push(d) })
   if (state.onboarded === undefined) state.onboarded = false
   var obStep = 1
   var tab = state.onboarded ? 'quote' : 'onboard'
@@ -104,6 +105,9 @@
     h += '<div class="row" style="margin-bottom:10px"><div style="flex:0 0 150px"><label>Ceiling height</label><select data-f="height" data-num="1">'
     P.CEILING_HEIGHTS.forEach(function (c) { h += '<option value="' + c + '"' + (Number(d.height) === c ? ' selected' : '') + '>' + c + ' m' + (c === 2.4 ? ' (standard)' : '') + '</option>' })
     h += '</select></div></div>'
+    h += '<div class="row" style="margin-bottom:12px"><div style="flex:2 1 220px"><label>Quick start: whole house</label><select id="houseType"><option value="">Choose a house type...</option>'
+    P.HOUSE_TEMPLATES.forEach(function (t) { h += '<option value="' + t.id + '">' + esc(t.label) + '</option>' })
+    h += '</select></div><div style="flex:0 0 auto"><button class="btn sec" data-act="addhouse">Add rooms</button></div></div>'
     h += '<div class="chips">'
     P.ROOM_PRESETS.forEach(function (p) { h += '<button class="chip" data-act="addroom" data-id="' + p.id + '">+ ' + esc(p.label) + '</button>' })
     h += '<button class="chip" data-act="addblank">+ Custom room</button></div>'
@@ -154,6 +158,8 @@
     P.CONDITIONS.forEach(function (c) { h += '<option value="' + c.id + '"' + (j.condition === c.id ? ' selected' : '') + '>' + esc(c.label) + '</option>' })
     h += '</select></div></div>'
     h += '<div style="margin-top:10px"><label class="chk"><input type="checkbox" data-f="job.primer" data-bool="1"' + (j.primer ? ' checked' : '') + '> Add a primer / sealer coat</label></div>'
+    h += '<div style="margin-top:8px"><label class="chk"><input type="checkbox" data-f="job.heritage" data-bool="1"' + (j.heritage ? ' checked' : '') + '> Older timber home (VJ boards, ornate trim, high ceilings)</label></div>'
+    if (j.heritage) h += '<div class="hint" style="margin-top:8px">Built before 1970? The paint may contain lead &mdash; test before sanding or scraping. Add <b>Lead paint test</b> or <b>Lead-safe preparation</b> under Other work (switch them on under Prices).</div>'
     h += '<h3>Paint</h3>'
     P.PAINT_CATEGORIES.forEach(function (c) {
       var list = state.products.filter(function (p) { return p.category === c.id })
@@ -289,7 +295,7 @@
     doc.setFont('helvetica', 'bold'); doc.setFontSize(18); doc.setTextColor(31, 58, 95)
     doc.text(o.name || 'Painting quote', tx, y + 4)
     doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(100)
-    var contact = [o.abn && 'ABN ' + o.abn, o.phone, o.email].filter(Boolean).join('   |   ')
+    var contact = [o.abn && 'ABN ' + o.abn, o.licence && 'QBCC Lic. ' + o.licence, o.phone, o.email].filter(Boolean).join('   |   ')
     if (contact) doc.text(contact, tx, y + 10)
     doc.setFont('helvetica', 'bold'); doc.setFontSize(20); doc.setTextColor(31, 58, 95); doc.text('QUOTE', R, 22, { align: 'right' })
     doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(100)
@@ -467,11 +473,12 @@
     ['Job modifiers', null],
     ['primer_labour_factor', 'Primer coat labour (x one coat)'], ['condition_fair_factor', 'Prep factor: fair'], ['condition_poor_factor', 'Prep factor: poor'],
     ['storey_2_factor', 'Two-storey access factor'], ['storey_3_factor', 'Three-storey access factor'],
+    ['heritage_labour_factor', 'Older timber home: labour factor'], ['heritage_paint_factor', 'Older timber home: extra paint'],
     ['min_charge', 'Minimum labour charge ($)'], ['consumables_pct', 'Consumables (fraction of paint cost)']
   ]
   function viewSettings() {
     var h = ''
-    h += '<div class="card"><h2>Your business</h2><div class="row"><div style="flex:2 1 200px"><label>Business name</label><input data-f="org.name" value="' + esc(state.org.name) + '"></div><div><label>ABN</label><input data-f="org.abn" value="' + esc(state.org.abn) + '"></div></div>'
+    h += '<div class="card"><h2>Your business</h2><div class="row"><div style="flex:2 1 200px"><label>Business name</label><input data-f="org.name" value="' + esc(state.org.name) + '"></div><div><label>ABN</label><input data-f="org.abn" value="' + esc(state.org.abn) + '"></div></div><div class="row" style="margin-top:8px"><div><label>QBCC licence no.</label><input data-f="org.licence" value="' + esc(state.org.licence) + '"></div></div>'
     h += '<div class="row" style="margin-top:8px"><div><label>Phone</label><input data-f="org.phone" value="' + esc(state.org.phone) + '"></div><div><label>Email</label><input data-f="org.email" value="' + esc(state.org.email) + '"></div></div>'
     h += '<div class="row" style="margin-top:8px"><div><label>Margin (%)</label>' + num() + 'data-f="org.margin_rate" data-pct="1" value="' + Math.round(state.org.margin_rate * 1000) / 10 + '"></div><div><label>GST (%)</label>' + num() + 'data-f="org.gst_rate" data-pct="1" value="' + Math.round(state.org.gst_rate * 1000) / 10 + '"></div><div><label>Quote valid (days)</label>' + num(1) + 'data-f="org.valid_days" value="' + esc(state.org.valid_days) + '"></div></div>' + logoBox() + '</div>'
 
@@ -493,7 +500,7 @@
     h += '<div class="card"><h2>Job modifiers</h2>'
     RATE_LABELS.forEach(function (r) {
       if (r[1] === null) return
-      if (!/primer|condition|storey|min_charge|consumables/.test(r[0])) return
+      if (!/primer|condition|storey|heritage|min_charge|consumables/.test(r[0])) return
       h += '<div class="row" style="margin-bottom:6px;align-items:center"><div style="flex:2 1 170px">' + esc(r[1]) + '</div><div style="flex:0 0 110px">' + num() + 'data-f="rates.' + r[0] + '" value="' + esc(state.rates[r[0]]) + '"></div></div>'
     })
     h += '<div style="margin-top:8px"><label class="chk"><input type="checkbox" data-f="rates.round_paint_to_tins" data-bool="1"' + (state.rates.round_paint_to_tins ? ' checked' : '') + '> Charge whole tins (not just litres used)</label></div></div>'
@@ -541,10 +548,11 @@
     if (obStep === 1) {
       h += '<h2>Welcome &mdash; set up your business</h2><div class="row"><div style="flex:2 1 200px"><label>Business name</label><input data-f="org.name" value="' + esc(state.org.name) + '"></div></div>'
       h += '<div class="row" style="margin-top:8px"><div><label>Phone</label><input data-f="org.phone" value="' + esc(state.org.phone) + '"></div><div><label>Email</label><input data-f="org.email" value="' + esc(state.org.email) + '"></div></div>'
+      h += '<div class="row" style="margin-top:8px"><div><label>QBCC licence no. (shown on quotes)</label><input data-f="org.licence" value="' + esc(state.org.licence) + '"></div></div>'
       h += '<div class="row" style="margin-top:8px"><div><label>Profit margin (%)</label>' + num() + 'data-f="org.margin_rate" data-pct="1" value="' + Math.round(state.org.margin_rate * 1000) / 10 + '"></div><div><label>GST (%)</label>' + num() + 'data-f="org.gst_rate" data-pct="1" value="' + Math.round(state.org.gst_rate * 1000) / 10 + '"></div></div>' + logoBox()
     } else if (obStep === 2) {
       h += '<h2>What services do you offer?</h2><p class="note">Tick everything you do. You can add your own at the bottom, and change this any time.</p>'
-      ;[['interior', 'Interior'], ['exterior', 'Exterior'], ['other', 'Other work']].forEach(function (g) {
+      ;[['interior', 'Interior'], ['exterior', 'Exterior'], ['qld', 'Queenslander & older homes'], ['other', 'Other work']].forEach(function (g) {
         h += '<h3>' + g[1] + '</h3>'
         state.services.forEach(function (sv, i) {
           if (sv.group !== g[0]) return
@@ -631,6 +639,14 @@
       var p = P.ROOM_PRESETS.filter(function (x) { return x.id === b.dataset.id })[0]
       j.rooms.push(P.roomFromPreset(p, Number(d.height) || 2.4))
     } else if (act === 'addblank') { var r = P.emptyRoom('Room ' + (j.rooms.length + 1)); r.height = Number(d.height) || 2.4; j.rooms.push(r) }
+    else if (act === 'addhouse') {
+      var tid = $('#houseType').value
+      if (!tid) { alert('Choose a house type first.'); return }
+      var tpl = P.HOUSE_TEMPLATES.filter(function (x) { return x.id === tid })[0]
+      if (j.rooms.length && !confirm('Add these rooms to the ' + j.rooms.length + ' already on the quote?')) return
+      P.roomsFromTemplate(tpl).forEach(function (r) { j.rooms.push(r) })
+      d.height = tpl.height; if (tpl.heritage) j.heritage = true
+    }
     else if (act === 'dup') { var c = JSON.parse(JSON.stringify(j.rooms[i])); c.name += ' (copy)'; j.rooms.splice(i + 1, 0, c) }
     else if (act === 'rmroom') j.rooms.splice(i, 1)
     else if (act === 'addextra') {
@@ -689,7 +705,7 @@
     var scope = P.describeScope({ job: d.job, quantities: q.quantities })
     var existing = state.quotes.filter(function (s) { return s.draft.id === d.id })[0]
     var number = existing ? existing.number : state.org.quote_prefix + state.org.next_number
-    var h = '<div class="doc"><div class="hd"><div>' + (o.logo ? '<img src="' + o.logo + '" style="max-height:60px;max-width:200px;margin-bottom:6px"><br>' : '') + '<h1>' + esc(o.name) + '</h1><div class="meta">' + [o.abn && 'ABN ' + esc(o.abn), esc(o.phone), esc(o.email)].filter(Boolean).join(' · ') + '</div></div>'
+    var h = '<div class="doc"><div class="hd"><div>' + (o.logo ? '<img src="' + o.logo + '" style="max-height:60px;max-width:200px;margin-bottom:6px"><br>' : '') + '<h1>' + esc(o.name) + '</h1><div class="meta">' + [o.abn && 'ABN ' + esc(o.abn), o.licence && 'QBCC Lic. ' + esc(o.licence), esc(o.phone), esc(o.email)].filter(Boolean).join(' · ') + '</div></div>'
     h += '<div style="text-align:right"><b style="font-size:20px">QUOTE</b><div class="meta">' + esc(number) + '<br>' + esc(today()) + '<br>Valid ' + esc(o.valid_days) + ' days</div></div></div>'
     h += '<div><b>Prepared for</b><br>' + esc(d.customer.name || '—') + (d.customer.address ? '<br>' + esc(d.customer.address) : '') + '</div>'
     h += '<div class="scope"><b>Scope of work</b><ul>' + scope.map(function (l) { return '<li>' + esc(l) + '</li>' }).join('') + '</ul></div>'

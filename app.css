@@ -61,3 +61,10 @@ nav{display:flex;flex-wrap:nowrap}nav button{padding:8px 8px;white-space:nowrap}
 .bar .btn{padding:10px 10px;font-size:14px}.bar .tot small{white-space:nowrap}
 
 @media(max-width:400px){nav button{padding:8px 5px;font-size:14px}.brand{font-size:15px}.demo{display:none}}
+
+/* header: brand on top, tabs full width underneath (fits any phone) */
+.top{flex-wrap:wrap;gap:6px 0;padding-bottom:6px}
+.top .brand{flex:1 1 100%}
+.top nav{flex:1 1 100%;display:flex;gap:2px}
+.top nav button{flex:1 1 0;text-align:center;padding:9px 2px;font-size:15px}
+.demo{display:none}
