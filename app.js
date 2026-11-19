@@ -172,6 +172,7 @@
 
     // breakdown (painter only)
     h += '<div class="card" id="breakdown">' + breakdown() + '</div>'
+    h += '<div class="card"><h2>Send to customer</h2><div id="sendbox">' + sendBox() + '</div></div>'
     return h
   }
 
@@ -246,6 +247,109 @@
     })
   }
 
+  function logoBox() {
+    var o = state.org
+    var h = '<div style="margin-top:12px"><label>Logo (shown on customer quotes)</label>'
+    if (o.logo) h += '<div style="margin:6px 0"><img src="' + o.logo + '" alt="Logo" style="max-height:56px;max-width:180px;border:1px solid var(--line);border-radius:8px;padding:4px;background:#fff"></div><button class="link red" data-act="rmlogo">Remove logo</button>'
+    else h += '<input id="logoFile" type="file" accept="image/png,image/jpeg,image/webp">'
+    return h + '</div>'
+  }
+  function readLogo(file) {
+    return createImageBitmap(file, { imageOrientation: 'from-image' }).then(function (bmp) {
+      var k = Math.min(1, 360 / Math.max(bmp.width, bmp.height))
+      var c = document.createElement('canvas'); c.width = Math.max(1, Math.round(bmp.width * k)); c.height = Math.max(1, Math.round(bmp.height * k))
+      var ctx = c.getContext('2d'); ctx.drawImage(bmp, 0, 0, c.width, c.height)
+      var png = file.type === 'image/png' || file.type === 'image/webp' // keep transparency
+      if (!png) { ctx.globalCompositeOperation = 'destination-over'; ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height) }
+      state.org.logo = c.toDataURL(png ? 'image/png' : 'image/jpeg', 0.9)
+      state.org.logo_type = png ? 'PNG' : 'JPEG'; state.org.logo_w = c.width; state.org.logo_h = c.height
+    })
+  }
+
+  // ---------- customer quote as a real PDF file ----------
+  function peekNumber(d) {
+    var ex = state.quotes.filter(function (s) { return s.draft.id === d.id })[0]
+    return ex ? ex.number : state.org.quote_prefix + state.org.next_number
+  }
+  function makePdf() {
+    var jsPDF = window.jspdf && window.jspdf.jsPDF
+    if (!jsPDF) throw new Error('PDF tools did not load - check your connection and reload.')
+    var d = state.draft, q = calc(d), o = state.org
+    var scope = P.describeScope({ job: d.job, quantities: q.quantities })
+    var number = peekNumber(d)
+    var doc = new jsPDF({ unit: 'mm', format: 'a4' })
+    var L = 16, R = 194, y = 18
+    var tx = L
+    if (o.logo) {
+      var h = Math.min(18, 45 * o.logo_h / o.logo_w), w = h * o.logo_w / o.logo_h
+      doc.addImage(o.logo, o.logo_type || 'PNG', L, y - 4, w, h, undefined, 'FAST')
+      y += h + 2
+    }
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(18); doc.setTextColor(31, 58, 95)
+    doc.text(o.name || 'Painting quote', tx, y + 4)
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(100)
+    var contact = [o.abn && 'ABN ' + o.abn, o.phone, o.email].filter(Boolean).join('   |   ')
+    if (contact) doc.text(contact, tx, y + 10)
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(20); doc.setTextColor(31, 58, 95); doc.text('QUOTE', R, 22, { align: 'right' })
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(100)
+    doc.text([number, today(), 'Valid ' + o.valid_days + ' days'], R, 28, { align: 'right' })
+    y += 16
+    doc.setDrawColor(31, 58, 95); doc.setLineWidth(0.8); doc.line(L, y, R, y); y += 9
+    doc.setTextColor(20); doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.text('Prepared for', L, y); y += 5
+    doc.setFont('helvetica', 'normal')
+    var cust = [d.customer.name || '-', d.customer.address].filter(Boolean)
+    cust.forEach(function (l) { doc.text(l, L, y); y += 5 })
+    y += 5
+    var need = function (n) { if (y + n > 275) { doc.addPage(); y = 20 } }
+    doc.setFont('helvetica', 'bold'); doc.text('Scope of work', L, y); y += 6
+    doc.setFont('helvetica', 'normal')
+    scope.forEach(function (line) {
+      doc.splitTextToSize(line, R - L - 6).forEach(function (part, i) { need(6); if (i === 0) doc.text('-', L, y); doc.text(part, L + 5, y); y += 5 })
+      y += 1
+    })
+    if (d.notes) {
+      y += 3; need(14); doc.setFont('helvetica', 'bold'); doc.text('Notes', L, y); y += 5; doc.setFont('helvetica', 'normal')
+      doc.splitTextToSize(d.notes, R - L).forEach(function (part) { need(6); doc.text(part, L, y); y += 5 })
+    }
+    y += 8; need(34)
+    var rowAt = function (label, val, bold) { doc.setFont('helvetica', bold ? 'bold' : 'normal'); doc.setFontSize(bold ? 12 : 10); doc.text(label, 120, y); doc.text(val, R, y, { align: 'right' }); y += bold ? 7 : 6 }
+    rowAt('Total (ex GST)', money(q.preGst)); rowAt('GST', money(q.gst))
+    doc.setLineWidth(0.4); doc.setDrawColor(20); doc.line(120, y - 3, R, y - 3); y += 1.5
+    rowAt('Total', money(q.total), true)
+    y += 8; need(16)
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(100)
+    var fine = (P.hasEstimates(d.job) ? 'Some room sizes are estimates. The price will be confirmed after final measurement on site. ' : '') + 'Paint, materials and labour are included. This quote is valid for ' + o.valid_days + ' days.'
+    doc.splitTextToSize(fine, R - L).forEach(function (part) { doc.text(part, L, y); y += 4 })
+    var safe = function (t) { return String(t || '').replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '') }
+    var name = 'Quote-' + safe(number) + (d.customer.name ? '-' + safe(d.customer.name) : '') + '.pdf'
+    return { blob: doc.output('blob'), name: name, number: number, total: q.total }
+  }
+  function ensureQuote() {
+    var q = calc()
+    if (!q.total) { alert('Add at least one room or surface first.'); return false }
+    saveQuote(true); return true
+  }
+  function downloadPdf() {
+    if (!ensureQuote()) return
+    try {
+      var r = makePdf(), url = URL.createObjectURL(r.blob), a = document.createElement('a')
+      a.href = url; a.download = r.name; document.body.appendChild(a); a.click(); a.remove()
+      setTimeout(function () { URL.revokeObjectURL(url) }, 4000)
+      toast('PDF saved: ' + r.name)
+    } catch (e) { alert(e.message) }
+  }
+  function sharePdf() {
+    if (!ensureQuote()) return
+    var r
+    try { r = makePdf() } catch (e) { alert(e.message); return }
+    var file = new File([r.blob], r.name, { type: 'application/pdf' })
+    var who = state.draft.customer.name ? state.draft.customer.name.split(' ')[0] : 'there'
+    var data = { files: [file], title: 'Quote ' + r.number, text: 'Hi ' + who + ', here is your painting quote from ' + state.org.name + '.' }
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      navigator.share(data).catch(function (e) { if (e && e.name !== 'AbortError') downloadPdf() })
+    } else { downloadPdf() }
+  }
+
   function roomCard(r, i) {
     var m = P.measureRoom(r)
     var h = '<div class="room"><div class="head"><input data-f="job.rooms.' + i + '.name" value="' + esc(r.name) + '">'
@@ -292,6 +396,19 @@
     return h + '<div class="row"><div><label>' + esc(unitShort(sv.unit)) + '</label>' + num(sv.unit === 'each' ? 1 : 'any') + 'data-f="job.custom.' + i + '.qty" value="' + esc(c.qty) + '"></div></div></div>'
   }
 
+  function sendBox() {
+    var d = state.draft, q = calc(d), c = d.customer
+    var who = c.name ? c.name.split(' ')[0] : 'there'
+    var body = 'Hi ' + who + ', here is your painting quote from ' + state.org.name + ': ' + money(q.total) + ' including GST. Happy to answer any questions.'
+    var h = '<div class="row"><button class="btn acc" data-act="share">Share PDF</button><button class="btn sec" data-act="download">Download PDF</button></div>'
+    h += '<p class="note" style="margin:10px 0 6px">The PDF shows the scope and total only &mdash; never your labour, materials or margin.</p><div class="row" style="gap:14px">'
+    if (c.email) h += '<a class="link" href="mailto:' + esc(c.email) + '?subject=' + encodeURIComponent('Painting quote from ' + state.org.name) + '&body=' + encodeURIComponent(body) + '">Email message</a>'
+    if (c.phone) h += '<a class="link" href="sms:' + esc(c.phone) + '?&body=' + encodeURIComponent(body) + '">Text message</a>'
+    h += '<button class="link" data-act="pdf">Print</button></div>'
+    if (!c.email && !c.phone) h += '<p class="note">Add the customer\'s email or phone above to get email / text shortcuts.</p>'
+    return h
+  }
+
   function breakdown() {
     var q = calc(), d = state.draft
     var h = '<h2>Price breakdown <span class="note">(only you see this)</span></h2>'
@@ -316,12 +433,13 @@
     var bar = $('#bar')
     if (!bar) { bar = document.createElement('div'); bar.id = 'bar'; bar.className = 'bar'; document.body.appendChild(bar) }
     bar.innerHTML = '<div class="in"><div class="tot"><small>Total inc GST</small><b>' + money0(q.total) + '</b></div>' +
-      '<button class="btn sec" data-act="clear">New</button><button class="btn sec" data-act="save">Save</button><button class="btn acc" data-act="pdf">Customer PDF</button></div>'
+      '<button class="btn sec" data-act="clear">New</button><button class="btn sec" data-act="save">Save</button><button class="btn acc" data-act="share">Send quote</button></div>'
   }
   function removeBar() { var b = $('#bar'); if (b) b.remove() }
 
   function updateLive() {
     var b = $('#breakdown'); if (b) b.innerHTML = breakdown()
+    var sb = $('#sendbox'); if (sb) sb.innerHTML = sendBox()
     renderBar()
     state.draft.job.rooms.forEach(function (r, i) { var el = $('#rs' + i); if (el) el.textContent = roomSummary(P.measureRoom(r)) })
   }
@@ -354,7 +472,7 @@
     var h = '<div class="hint">These are ballpark starting prices. Change them to your own &mdash; every quote uses whatever is here.</div>'
     h += '<div class="card"><h2>Your business</h2><div class="row"><div style="flex:2 1 200px"><label>Business name</label><input data-f="org.name" value="' + esc(state.org.name) + '"></div><div><label>ABN</label><input data-f="org.abn" value="' + esc(state.org.abn) + '"></div></div>'
     h += '<div class="row" style="margin-top:8px"><div><label>Phone</label><input data-f="org.phone" value="' + esc(state.org.phone) + '"></div><div><label>Email</label><input data-f="org.email" value="' + esc(state.org.email) + '"></div></div>'
-    h += '<div class="row" style="margin-top:8px"><div><label>Margin (%)</label>' + num() + 'data-f="org.margin_rate" data-pct="1" value="' + Math.round(state.org.margin_rate * 1000) / 10 + '"></div><div><label>GST (%)</label>' + num() + 'data-f="org.gst_rate" data-pct="1" value="' + Math.round(state.org.gst_rate * 1000) / 10 + '"></div><div><label>Quote valid (days)</label>' + num(1) + 'data-f="org.valid_days" value="' + esc(state.org.valid_days) + '"></div></div></div>'
+    h += '<div class="row" style="margin-top:8px"><div><label>Margin (%)</label>' + num() + 'data-f="org.margin_rate" data-pct="1" value="' + Math.round(state.org.margin_rate * 1000) / 10 + '"></div><div><label>GST (%)</label>' + num() + 'data-f="org.gst_rate" data-pct="1" value="' + Math.round(state.org.gst_rate * 1000) / 10 + '"></div><div><label>Quote valid (days)</label>' + num(1) + 'data-f="org.valid_days" value="' + esc(state.org.valid_days) + '"></div></div>' + logoBox() + '</div>'
     h += '<div class="card"><h2>My services</h2><p class="note" style="margin:0 0 8px">Tick what you offer and set your rate. Only ticked services appear when you quote.</p>'
     state.services.forEach(function (sv, i) {
       h += '<div class="room"><label class="chk" style="font-weight:600"><input type="checkbox" data-f="services.' + i + '.enabled" data-bool="1" data-rerender="1"' + (sv.enabled !== false ? ' checked' : '') + '> ' + esc(sv.name) + '</label>'
@@ -413,7 +531,7 @@
     if (obStep === 1) {
       h += '<h2>Welcome &mdash; set up your business</h2><div class="row"><div style="flex:2 1 200px"><label>Business name</label><input data-f="org.name" value="' + esc(state.org.name) + '"></div></div>'
       h += '<div class="row" style="margin-top:8px"><div><label>Phone</label><input data-f="org.phone" value="' + esc(state.org.phone) + '"></div><div><label>Email</label><input data-f="org.email" value="' + esc(state.org.email) + '"></div></div>'
-      h += '<div class="row" style="margin-top:8px"><div><label>Profit margin (%)</label>' + num() + 'data-f="org.margin_rate" data-pct="1" value="' + Math.round(state.org.margin_rate * 1000) / 10 + '"></div><div><label>GST (%)</label>' + num() + 'data-f="org.gst_rate" data-pct="1" value="' + Math.round(state.org.gst_rate * 1000) / 10 + '"></div></div>'
+      h += '<div class="row" style="margin-top:8px"><div><label>Profit margin (%)</label>' + num() + 'data-f="org.margin_rate" data-pct="1" value="' + Math.round(state.org.margin_rate * 1000) / 10 + '"></div><div><label>GST (%)</label>' + num() + 'data-f="org.gst_rate" data-pct="1" value="' + Math.round(state.org.gst_rate * 1000) / 10 + '"></div></div>' + logoBox()
     } else if (obStep === 2) {
       h += '<h2>What services do you offer?</h2><p class="note">Tick everything you do. You can add your own at the bottom, and change this any time.</p>'
       ;[['interior', 'Interior'], ['exterior', 'Exterior'], ['other', 'Other work']].forEach(function (g) {
@@ -481,6 +599,7 @@
   })
   document.addEventListener('change', function (e) {
     var el = e.target
+    if (el.id === 'logoFile' && el.files && el.files[0]) { readLogo(el.files[0]).then(function () { save(); render() }).catch(function () { alert('Could not read that image.') }); return }
     if (el.dataset.act === 'setdef') {
       var i = Number(el.dataset.i), cat = state.products[i].category
       state.products.forEach(function (p) { if (p.category === cat) p.is_default = false })
@@ -521,6 +640,9 @@
     else if (act === 'addequip') j.equipment.push({ name: '', cost: '' })
     else if (act === 'rmequip') j.equipment.splice(i, 1)
     else if (act === 'analyse') return analysePhotos()
+    else if (act === 'share') return sharePdf()
+    else if (act === 'download') return downloadPdf()
+    else if (act === 'rmlogo') { delete state.org.logo; delete state.org.logo_w; delete state.org.logo_h; delete state.org.logo_type }
     else if (act === 'save') return saveQuote()
     else if (act === 'pdf') return printQuote()
     else if (act === 'clear') { if (confirm('Start a new blank quote?')) state.draft = newDraft(); else return }
@@ -533,14 +655,14 @@
     save(); render()
   })
 
-  function saveQuote() {
+  function saveQuote(silent) {
     var d = state.draft, q = calc(d)
-    if (!q.total) { alert('Add at least one room or surface first.'); return }
+    if (!q.total) { if (!silent) alert('Add at least one room or surface first.'); return }
     var existing = state.quotes.filter(function (s) { return s.draft.id === d.id })[0]
     var number = existing ? existing.number : state.org.quote_prefix + state.org.next_number++
     var rec = { number: number, date: today(), customer: d.customer, total: q.total, draft: JSON.parse(JSON.stringify(d)) }
     if (existing) state.quotes[state.quotes.indexOf(existing)] = rec; else state.quotes.push(rec)
-    save(); toast('Saved as ' + number)
+    save(); if (!silent) toast('Saved as ' + number)
   }
   function today() { return new Date().toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' }) }
   function toast(t) {
@@ -556,7 +678,7 @@
     var scope = P.describeScope({ job: d.job, quantities: q.quantities })
     var existing = state.quotes.filter(function (s) { return s.draft.id === d.id })[0]
     var number = existing ? existing.number : state.org.quote_prefix + state.org.next_number
-    var h = '<div class="doc"><div class="hd"><div><h1>' + esc(o.name) + '</h1><div class="meta">' + [o.abn && 'ABN ' + esc(o.abn), esc(o.phone), esc(o.email)].filter(Boolean).join(' · ') + '</div></div>'
+    var h = '<div class="doc"><div class="hd"><div>' + (o.logo ? '<img src="' + o.logo + '" style="max-height:60px;max-width:200px;margin-bottom:6px"><br>' : '') + '<h1>' + esc(o.name) + '</h1><div class="meta">' + [o.abn && 'ABN ' + esc(o.abn), esc(o.phone), esc(o.email)].filter(Boolean).join(' · ') + '</div></div>'
     h += '<div style="text-align:right"><b style="font-size:20px">QUOTE</b><div class="meta">' + esc(number) + '<br>' + esc(today()) + '<br>Valid ' + esc(o.valid_days) + ' days</div></div></div>'
     h += '<div><b>Prepared for</b><br>' + esc(d.customer.name || '—') + (d.customer.address ? '<br>' + esc(d.customer.address) : '') + '</div>'
     h += '<div class="scope"><b>Scope of work</b><ul>' + scope.map(function (l) { return '<li>' + esc(l) + '</li>' }).join('') + '</ul></div>'
