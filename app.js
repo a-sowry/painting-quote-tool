@@ -112,6 +112,8 @@
     j.rooms.forEach(function (r, i) { h += roomCard(r, i) })
     h += '</div></div>'
 
+    h += photoCard()
+
     // other work: extra surfaces + the painter's own services
     var opts = ''
     P.EXTRA_KINDS.forEach(function (k) { if (svcOn(EXTRA_SVC[k.id])) opts += '<option value="x:' + k.id + '">' + esc(k.label) + '</option>' })
@@ -137,7 +139,8 @@
       P.STOREYS.forEach(function (s) { h += '<option value="' + s.id + '"' + (Number(e.storeys) === s.id ? ' selected' : '') + '>' + esc(s.label) + '</option>' })
       h += '</select></div></div>'
       h += '<div class="sum">Not sure of the wall area? A typical single-storey house is about 150&ndash;220 sqm of wall.</div>'
-      if (e.source !== 'measured') h += '<div class="sum"><span class="tag">estimated size</span></div>'
+      if (e.source === 'photo') h += '<div class="sum"><span class="tag photo">from photo</span> ' + esc(e.note || '') + '</div>'
+      else if (e.source !== 'measured') h += '<div class="sum"><span class="tag">estimated size</span></div>'
       h += '<div style="margin-top:8px"><button class="link red" data-act="rmext">Remove exterior</button></div>'
     }
     if (extOn) h += '</div>'
@@ -172,6 +175,77 @@
     return h
   }
 
+  function photoCard() {
+    var modes = ''
+    if (svcOn('interior_wall')) modes += '<option value="room">A whole room</option><option value="wall">One wall / feature wall</option>'
+    if (svcOn('ext_wall')) modes += '<option value="exterior">House exterior</option>'
+    if (!modes) return ''
+    var cfg = window.PQ_CONFIG || {}
+    var h = '<div class="card"><h2>Add from a photo</h2>'
+    if (!cfg.SUPABASE_URL) return h + '<div class="note">Photo measuring isn\'t switched on yet.</div></div>'
+    h += '<p class="note" style="margin:0 0 8px">Take 1&ndash;4 photos. For a room, stand in a corner so both walls and a door are in view. The size is an estimate &mdash; check it before sending the quote.</p>'
+    h += '<div class="row"><div><label>What is it?</label><select id="photoMode">' + modes + '</select></div><div><label>Access code</label><input id="photoCode" type="password" autocomplete="off" value="' + esc(getCode()) + '"></div></div>'
+    h += '<div style="margin-top:8px"><input id="photoFiles" type="file" accept="image/*" multiple></div>'
+    h += '<div style="margin-top:10px"><button class="btn" data-act="analyse">Measure from photo</button></div><div id="photoMsg" class="note" style="margin-top:8px"></div></div>'
+    return h
+  }
+  function getCode() { try { return localStorage.getItem('pq.code') || '' } catch (e) { return '' } }
+
+  // Shrink a phone photo (often 4000+ px) before upload, honouring camera rotation.
+  function downscale(file, maxSide, quality) {
+    maxSide = maxSide || 1280; quality = quality || 0.82
+    return createImageBitmap(file, { imageOrientation: 'from-image' }).then(function (bmp) {
+      var k = Math.min(1, maxSide / Math.max(bmp.width, bmp.height))
+      var c = document.createElement('canvas'); c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k)
+      c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height)
+      return { mediaType: 'image/jpeg', data: c.toDataURL('image/jpeg', quality).split(',')[1] }
+    })
+  }
+  function applyEstimate(mode, est) {
+    var j = state.draft.job, note = (est.confidence ? est.confidence + ' confidence' : '') + (est.reasoning ? ' \u2014 ' + est.reasoning : '')
+    var n = function (v) { return Math.round((Number(v) || 0) * 10) / 10 }
+    if (mode === 'room') {
+      var r = P.emptyRoom('Room (photo)')
+      r.length = n(est.length_m); r.width = n(est.width_m); r.height = n(est.height_m) || 2.4
+      r.doors = Math.max(0, Math.floor(est.doors || 0)); r.windows = Math.max(0, Math.floor(est.windows || 0))
+      r.source = 'photo'; r.note = note; j.rooms.push(r)
+    } else if (mode === 'wall') {
+      var x = P.emptyExtra('wall'); x.a = n(est.wall_width_m); x.b = n(est.wall_height_m); x.source = 'photo'; x.note = note; j.extras.push(x)
+    } else {
+      var e = P.emptyExterior()
+      e.wallArea = Math.round(Number(est.wall_area_m2) || 0); e.trimLength = Math.round(Number(est.trim_length_m) || 0)
+      e.storeys = [1, 2, 3].indexOf(Number(est.storeys)) >= 0 ? Number(est.storeys) : 1
+      e.doors = Math.max(0, Math.floor(est.doors || 0)); e.windows = Math.max(0, Math.floor(est.windows || 0))
+      e.source = 'photo'; e.note = note; j.exterior = e
+    }
+  }
+  function analysePhotos() {
+    var cfg = window.PQ_CONFIG || {}, msg = $('#photoMsg'), btn = $('[data-act="analyse"]')
+    var files = Array.prototype.slice.call($('#photoFiles').files || [], 0, 4)
+    var code = $('#photoCode').value.trim(), mode = $('#photoMode').value
+    if (location.protocol === 'file:') { msg.textContent = 'Photo measuring only works on the hosted site, not a downloaded file.'; return }
+    if (!files.length) { msg.textContent = 'Choose or take a photo first.'; return }
+    if (!code) { msg.textContent = 'Enter the access code.'; return }
+    try { localStorage.setItem('pq.code', code) } catch (e) {}
+    btn.disabled = true; msg.textContent = 'Measuring\u2026 this takes a few seconds.'
+    Promise.all(files.map(function (f) { return downscale(f) })).then(function (images) {
+      return fetch(cfg.SUPABASE_URL.replace(/\/$/, '') + '/functions/v1/analyse-photo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', apikey: cfg.SUPABASE_KEY, 'x-access-code': code },
+        body: JSON.stringify({ images: images, mode: mode, ceilingHeight: Number(state.draft.height) || 0 })
+      })
+    }).then(function (res) {
+      return res.json().catch(function () { return {} }).then(function (b) { if (!res.ok) throw new Error(b.error || 'Photo measuring failed (' + res.status + ')'); return b })
+    }).then(function (b) {
+      applyEstimate(mode, b.estimate); save(); render()
+      var m = $('#photoMsg'); if (m) m.textContent = 'Added. Check the sizes below and adjust if needed.'
+      window.scrollTo(0, document.body.scrollHeight * 0.2)
+    }).catch(function (e) {
+      btn.disabled = false
+      msg.textContent = /Failed to fetch|NetworkError|Load failed/i.test(e.message) ? 'Could not reach the server. Check your connection and try again.' : e.message
+    })
+  }
+
   function roomCard(r, i) {
     var m = P.measureRoom(r)
     var h = '<div class="room"><div class="head"><input data-f="job.rooms.' + i + '.name" value="' + esc(r.name) + '">'
@@ -187,7 +261,7 @@
     ;[['ceiling', 'Ceiling', 'ceiling'], ['trim', 'Skirting', 'trim'], ['paintDoors', 'Doors', 'door'], ['paintWindows', 'Window frames', 'window']].filter(function (c) { return svcOn(c[2]) }).forEach(function (c) {
       h += '<label class="chk"><input type="checkbox" data-f="job.rooms.' + i + '.' + c[0] + '" data-bool="1"' + (r[c[0]] ? ' checked' : '') + '> ' + c[1] + '</label>'
     })
-    h += '</div><div class="sum" id="rs' + i + '">' + roomSummary(m) + '</div></div>'
+    h += '</div><div class="sum" id="rs' + i + '">' + roomSummary(m) + '</div>' + (r.note && r.source === 'photo' ? '<div class="sum">Photo estimate: ' + esc(r.note) + '</div>' : '') + '</div>'
     return h
   }
   function roomSummary(m) {
@@ -206,7 +280,7 @@
     h += '<button class="link red" data-act="rmextra" data-i="' + i + '">&times;</button></div><div class="row">'
     h += '<div><label>' + esc(def.fields[0]) + '</label>' + num(def.measure === 'count' ? 1 : 'any') + 'data-f="job.extras.' + i + '.a" data-clr="1" value="' + esc(x.a) + '"></div>'
     if (def.fields[1]) h += '<div><label>' + esc(def.fields[1]) + '</label>' + num() + 'data-f="job.extras.' + i + '.b" data-clr="1" value="' + esc(x.b) + '"></div>'
-    h += '</div></div>'
+    h += '</div>' + (x.note && x.source === 'photo' ? '<div class="sum">Photo estimate: ' + esc(x.note) + '</div>' : '') + '</div>'
     return h
   }
 
@@ -446,6 +520,7 @@
     else if (act === 'rmext') j.exterior = null
     else if (act === 'addequip') j.equipment.push({ name: '', cost: '' })
     else if (act === 'rmequip') j.equipment.splice(i, 1)
+    else if (act === 'analyse') return analysePhotos()
     else if (act === 'save') return saveQuote()
     else if (act === 'pdf') return printQuote()
     else if (act === 'clear') { if (confirm('Start a new blank quote?')) state.draft = newDraft(); else return }
