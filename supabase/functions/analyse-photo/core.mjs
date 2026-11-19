@@ -84,13 +84,14 @@ export function buildAnthropicRequest(body, model) {
   const text =
     `Mode: ${body.mode}. ` +
     (body.mode === 'room' && height > 0 ? `The person says the ceiling height is ${height} m - use that. ` : '') +
-    `Estimate the measurements from the ${body.images.length > 1 ? 'photos' : 'photo'} and report them with the tool.`
+    `Estimate the measurements from the ${body.images.length > 1 ? 'photos' : 'photo'} and report them by calling the report_measurements tool. Do not reply with plain text.`
   return {
     model,
     max_tokens: 1024,
     system: SYSTEM,
     tools: [toolFor(body.mode)],
-    tool_choice: { type: 'tool', name: 'report_measurements' },
+    // Some models reject a forced tool call, so ask for it in the prompt and let the model choose it.
+    tool_choice: { type: 'auto' },
     messages: [{
       role: 'user',
       content: [

@@ -19,9 +19,10 @@ test('access code check', () => {
   assert.equal(codeMatches('anything', ''), false) // unset secret never lets anyone in
   assert.equal(codeMatches(undefined, 'abc123'), false)
 })
-test('request forces the tool call and includes the photos and ceiling height', () => {
+test('request asks for the tool and includes the photos and ceiling height', () => {
   const r = buildAnthropicRequest({ mode: 'room', images: [img, img], ceilingHeight: 2.7 }, 'm')
-  assert.deepEqual(r.tool_choice, { type: 'tool', name: 'report_measurements' })
+  assert.deepEqual(r.tool_choice, { type: 'auto' })
+  assert.match(r.messages[0].content.at(-1).text, /report_measurements/)
   assert.equal(r.messages[0].content.filter((c) => c.type === 'image').length, 2)
   assert.match(r.messages[0].content.at(-1).text, /2\.7 m/)
   assert.ok(toolFor('exterior').input_schema.required.includes('wall_area_m2'))
