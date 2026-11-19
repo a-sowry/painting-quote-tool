@@ -79,6 +79,7 @@
     if (tab === 'onboard') app.innerHTML = viewOnboard()
     else if (tab === 'quote') app.innerHTML = viewQuote()
     else if (tab === 'history') app.innerHTML = viewHistory()
+    else if (tab === 'settings') app.innerHTML = viewSettings()
     else app.innerHTML = viewPrices()
     if (tab === 'quote') renderBar(); else removeBar()
     window.scrollTo(0, y)
@@ -468,11 +469,20 @@
     ['storey_2_factor', 'Two-storey access factor'], ['storey_3_factor', 'Three-storey access factor'],
     ['min_charge', 'Minimum labour charge ($)'], ['consumables_pct', 'Consumables (fraction of paint cost)']
   ]
-  function viewPrices() {
-    var h = '<div class="hint">These are ballpark starting prices. Change them to your own &mdash; every quote uses whatever is here.</div>'
+  function viewSettings() {
+    var h = ''
     h += '<div class="card"><h2>Your business</h2><div class="row"><div style="flex:2 1 200px"><label>Business name</label><input data-f="org.name" value="' + esc(state.org.name) + '"></div><div><label>ABN</label><input data-f="org.abn" value="' + esc(state.org.abn) + '"></div></div>'
     h += '<div class="row" style="margin-top:8px"><div><label>Phone</label><input data-f="org.phone" value="' + esc(state.org.phone) + '"></div><div><label>Email</label><input data-f="org.email" value="' + esc(state.org.email) + '"></div></div>'
     h += '<div class="row" style="margin-top:8px"><div><label>Margin (%)</label>' + num() + 'data-f="org.margin_rate" data-pct="1" value="' + Math.round(state.org.margin_rate * 1000) / 10 + '"></div><div><label>GST (%)</label>' + num() + 'data-f="org.gst_rate" data-pct="1" value="' + Math.round(state.org.gst_rate * 1000) / 10 + '"></div><div><label>Quote valid (days)</label>' + num(1) + 'data-f="org.valid_days" value="' + esc(state.org.valid_days) + '"></div></div>' + logoBox() + '</div>'
+
+    h += '<div class="card"><h2>Quote numbering</h2><div class="row"><div><label>Prefix</label><input data-f="org.quote_prefix" value="' + esc(state.org.quote_prefix) + '"></div><div><label>Next number</label>' + num(1) + 'data-f="org.next_number" value="' + esc(state.org.next_number) + '"></div></div></div>'
+    h += '<div class="card"><h2>Photo measuring</h2><p class="note" style="margin:0 0 8px">The access code is saved on this device so you only enter it once.</p><div class="row"><div><label>Access code</label><input type="password" autocomplete="off" id="settingsCode" value="' + esc(getCode()) + '"></div></div></div>'
+    h += '<div class="card"><h2>Your data</h2><p class="note" style="margin:0 0 8px">Quotes and prices are saved on this device only.</p><button class="btn sec" data-act="reset">Reset everything to demo defaults</button></div>'
+    return h
+  }
+
+  function viewPrices() {
+    var h = '<div class="hint">These are ballpark starting prices. Change them to your own &mdash; every quote uses whatever is here. Business details and logo are under Settings.</div>'
     h += '<div class="card"><h2>My services</h2><p class="note" style="margin:0 0 8px">Tick what you offer and set your rate. Only ticked services appear when you quote.</p>'
     state.services.forEach(function (sv, i) {
       h += '<div class="room"><label class="chk" style="font-weight:600"><input type="checkbox" data-f="services.' + i + '.enabled" data-bool="1" data-rerender="1"' + (sv.enabled !== false ? ' checked' : '') + '> ' + esc(sv.name) + '</label>'
@@ -500,7 +510,7 @@
       })
       h += '<button class="btn sec sm" style="margin-top:8px" data-act="addprod" data-cat="' + c.id + '">+ Add ' + esc(c.label.toLowerCase()) + ' product</button>'
     })
-    h += '</div><div class="card"><button class="btn sec" data-act="reset">Reset everything to demo defaults</button></div>'
+    h += '</div>'
     return h
   }
 
@@ -582,6 +592,7 @@
 
   document.addEventListener('input', function (e) {
     var el = e.target
+    if (el.id === 'settingsCode') { try { localStorage.setItem('pq.code', el.value.trim()) } catch (x) {} return }
     if (el.dataset.sel) { state.draft.selection[el.dataset.sel] = el.value; save(); updateLive(); return }
     var f = el.dataset.f
     if (!f || el.type === 'radio') return
