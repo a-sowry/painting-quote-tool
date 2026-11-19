@@ -25,11 +25,13 @@
       rates: Object.assign({}, P.DEFAULT_RATES),
       products: P.DEFAULT_PRODUCTS.map(function (p) { return Object.assign({ id: uid() }, p) }),
       services: P.defaultServices(),
+      profile: defaultProfile(),
       onboarded: false,
       quotes: [],
       draft: newDraft()
     }
   }
+  function defaultProfile() { return { interior: true, exterior: true, homes: { qld: false, brick: false, unit: false } } }
   function newDraft() {
     return {
       id: uid(), customer: { name: '', address: '', phone: '', email: '' },
@@ -46,11 +48,31 @@
   if (!state.services) state.services = P.defaultServices()
   P.defaultServices().forEach(function (d) { if (!state.services.some(function (x) { return x.id === d.id })) state.services.push(d) })
   if (state.onboarded === undefined) state.onboarded = false
+  if (!state.profile) state.profile = defaultProfile()
+  if (!state.profile.homes) state.profile.homes = { qld: false, brick: false, unit: false }
   var obStep = 1
   var tab = state.onboarded ? 'quote' : 'onboard'
 
   // ---------- services ----------
   function enabledMap() { var m = {}; state.services.forEach(function (s) { if (s.builtin) m[s.id] = s.enabled !== false }); return m }
+  var QLD_EXTERIOR = ['balustrade', 'verandah_ceiling', 'lattice', 'stumps', 'scaffold']
+  var EXTERIOR_OTHER = ['fence', 'deck', 'roof', 'garage_door', 'pressure_wash']
+  // Pre-tick services from the "what do you paint?" answers. The painter can still change every tick.
+  function applyProfile() {
+    var p = state.profile, on = function (id, v) { state.services.forEach(function (s) { if (s.id === id) s.enabled = v }) }
+    P.BUILTIN_SERVICES.forEach(function (b) { on(b.id, b.group === 'interior' ? !!p.interior : !!p.exterior) })
+    EXTERIOR_OTHER.forEach(function (id) { if (!p.exterior) on(id, false) })
+    var anyQld = p.homes.qld
+    QLD_EXTERIOR.forEach(function (id) { on(id, !!(anyQld && p.exterior)) })
+    on('lead_test', !!anyQld); on('lead_safe', !!anyQld)
+    if (anyQld && p.exterior) { on('roof', true) }
+  }
+  function houseOrder() {
+    var key = { queenslander: 'qld', highset: 'qld', lowset: 'brick', townhouse: 'unit', unit: 'unit' }, h = state.profile.homes
+    var mine = P.HOUSE_TEMPLATES.filter(function (t) { return h[key[t.id]] }), rest = P.HOUSE_TEMPLATES.filter(function (t) { return !h[key[t.id]] })
+    return mine.concat(rest)
+  }
+  function showHeritage(j) { var h = state.profile.homes; return j.heritage || h.qld || (!h.brick && !h.unit) }
   function svcOn(id) { var s = state.services.filter(function (x) { return x.id === id })[0]; return !s || s.enabled !== false }
   function unitLabel(u) { return P.UNITS.filter(function (x) { return x.id === u })[0].label }
   function unitShort(u) { return { sqm: 'sqm', m: 'metres', each: 'how many', hour: 'hours', fixed: '' }[u] }
@@ -106,7 +128,7 @@
     P.CEILING_HEIGHTS.forEach(function (c) { h += '<option value="' + c + '"' + (Number(d.height) === c ? ' selected' : '') + '>' + c + ' m' + (c === 2.4 ? ' (standard)' : '') + '</option>' })
     h += '</select></div></div>'
     h += '<div class="row" style="margin-bottom:12px"><div style="flex:2 1 220px"><label>Quick start: whole house</label><select id="houseType"><option value="">Choose a house type...</option>'
-    P.HOUSE_TEMPLATES.forEach(function (t) { h += '<option value="' + t.id + '">' + esc(t.label) + '</option>' })
+    houseOrder().forEach(function (t) { h += '<option value="' + t.id + '">' + esc(t.label) + '</option>' })
     h += '</select></div><div style="flex:0 0 auto"><button class="btn sec" data-act="addhouse">Add rooms</button></div></div>'
     h += '<div class="chips">'
     P.ROOM_PRESETS.forEach(function (p) { h += '<button class="chip" data-act="addroom" data-id="' + p.id + '">+ ' + esc(p.label) + '</button>' })
@@ -158,8 +180,8 @@
     P.CONDITIONS.forEach(function (c) { h += '<option value="' + c.id + '"' + (j.condition === c.id ? ' selected' : '') + '>' + esc(c.label) + '</option>' })
     h += '</select></div></div>'
     h += '<div style="margin-top:10px"><label class="chk"><input type="checkbox" data-f="job.primer" data-bool="1"' + (j.primer ? ' checked' : '') + '> Add a primer / sealer coat</label></div>'
-    h += '<div style="margin-top:8px"><label class="chk"><input type="checkbox" data-f="job.heritage" data-bool="1"' + (j.heritage ? ' checked' : '') + '> Older timber home (VJ boards, ornate trim, high ceilings)</label></div>'
-    if (j.heritage) h += '<div class="hint" style="margin-top:8px">Built before 1970? The paint may contain lead &mdash; test before sanding or scraping. Add <b>Lead paint test</b> or <b>Lead-safe preparation</b> under Other work (switch them on under Prices).</div>'
+    if (showHeritage(j)) h += '<div style="margin-top:8px"><label class="chk"><input type="checkbox" data-f="job.heritage" data-bool="1"' + (j.heritage ? ' checked' : '') + '> Older timber home (VJ boards, ornate trim, high ceilings)</label></div>'
+    if (j.heritage && showHeritage(j)) h += '<div class="hint" style="margin-top:8px">Built before 1970? The paint may contain lead &mdash; test before sanding or scraping. Add <b>Lead paint test</b> or <b>Lead-safe preparation</b> under Other work (switch them on under Prices).</div>'
     h += '<h3>Paint</h3>'
     P.PAINT_CATEGORIES.forEach(function (c) {
       var list = state.products.filter(function (p) { return p.category === c.id })
@@ -482,6 +504,7 @@
     h += '<div class="row" style="margin-top:8px"><div><label>Phone</label><input data-f="org.phone" value="' + esc(state.org.phone) + '"></div><div><label>Email</label><input data-f="org.email" value="' + esc(state.org.email) + '"></div></div>'
     h += '<div class="row" style="margin-top:8px"><div><label>Margin (%)</label>' + num() + 'data-f="org.margin_rate" data-pct="1" value="' + Math.round(state.org.margin_rate * 1000) / 10 + '"></div><div><label>GST (%)</label>' + num() + 'data-f="org.gst_rate" data-pct="1" value="' + Math.round(state.org.gst_rate * 1000) / 10 + '"></div><div><label>Quote valid (days)</label>' + num(1) + 'data-f="org.valid_days" value="' + esc(state.org.valid_days) + '"></div></div>' + logoBox() + '</div>'
 
+    h += '<div class="card"><h2>What you paint</h2><p class="note" style="margin:0 0 4px">Controls the house types listed first and whether the older-timber option shows on quotes. Tick services under Prices.</p>' + profileBox() + '</div>'
     h += '<div class="card"><h2>Quote numbering</h2><div class="row"><div><label>Prefix</label><input data-f="org.quote_prefix" value="' + esc(state.org.quote_prefix) + '"></div><div><label>Next number</label>' + num(1) + 'data-f="org.next_number" value="' + esc(state.org.next_number) + '"></div></div></div>'
     h += '<div class="card"><h2>Photo measuring</h2><p class="note" style="margin:0 0 8px">The access code is saved on this device so you only enter it once.</p><div class="row"><div><label>Access code</label><input type="password" autocomplete="off" id="settingsCode" value="' + esc(getCode()) + '"></div></div></div>'
     h += '<div class="card"><h2>Your data</h2><p class="note" style="margin:0 0 8px">Quotes and prices are saved on this device only.</p><button class="btn sec" data-act="reset">Reset everything to demo defaults</button></div>'
@@ -543,14 +566,27 @@
     return h
   }
 
+  function profileBox() {
+    var p = state.profile, h = ''
+    h += '<h3>Type of work</h3><div style="margin:6px 0"><label class="chk"><input type="checkbox" data-f="profile.interior" data-bool="1"' + (p.interior ? ' checked' : '') + '> Interior painting</label></div>'
+    h += '<div style="margin:6px 0"><label class="chk"><input type="checkbox" data-f="profile.exterior" data-bool="1"' + (p.exterior ? ' checked' : '') + '> Exterior painting</label></div>'
+    h += '<h3>The homes you mostly paint</h3>'
+    ;[['qld', 'Queenslanders & older timber homes (VJ boards, verandahs, high ceilings)'], ['brick', 'Newer brick / low-set homes'], ['unit', 'Units & townhouses']].forEach(function (x) {
+      h += '<div style="margin:6px 0"><label class="chk"><input type="checkbox" data-f="profile.homes.' + x[0] + '" data-bool="1"' + (p.homes[x[0]] ? ' checked' : '') + '> ' + esc(x[1]) + '</label></div>'
+    })
+    return h
+  }
+
   function viewOnboard() {
-    var h = '<div class="card"><div class="note">Step ' + obStep + ' of 3</div>'
+    var h = '<div class="card"><div class="note">Step ' + obStep + ' of 4</div>'
     if (obStep === 1) {
       h += '<h2>Welcome &mdash; set up your business</h2><div class="row"><div style="flex:2 1 200px"><label>Business name</label><input data-f="org.name" value="' + esc(state.org.name) + '"></div></div>'
       h += '<div class="row" style="margin-top:8px"><div><label>Phone</label><input data-f="org.phone" value="' + esc(state.org.phone) + '"></div><div><label>Email</label><input data-f="org.email" value="' + esc(state.org.email) + '"></div></div>'
       h += '<div class="row" style="margin-top:8px"><div><label>QBCC licence no. (shown on quotes)</label><input data-f="org.licence" value="' + esc(state.org.licence) + '"></div></div>'
       h += '<div class="row" style="margin-top:8px"><div><label>Profit margin (%)</label>' + num() + 'data-f="org.margin_rate" data-pct="1" value="' + Math.round(state.org.margin_rate * 1000) / 10 + '"></div><div><label>GST (%)</label>' + num() + 'data-f="org.gst_rate" data-pct="1" value="' + Math.round(state.org.gst_rate * 1000) / 10 + '"></div></div>' + logoBox()
     } else if (obStep === 2) {
+      h += '<h2>What do you mostly paint?</h2><p class="note">This sets up your starting services and house types. You can change anything on the next screens.</p>' + profileBox()
+    } else if (obStep === 3) {
       h += '<h2>What services do you offer?</h2><p class="note">Tick everything you do. You can add your own at the bottom, and change this any time.</p>'
       ;[['interior', 'Interior'], ['exterior', 'Exterior'], ['qld', 'Queenslander & older homes'], ['other', 'Other work']].forEach(function (g) {
         h += '<h3>' + g[1] + '</h3>'
@@ -572,7 +608,7 @@
     }
     h += '<div class="row" style="margin-top:14px">'
     if (obStep > 1) h += '<button class="btn sec" data-act="obback">Back</button>'
-    h += obStep < 3 ? '<button class="btn" data-act="obnext">Next</button>' : '<button class="btn acc" data-act="obfinish">Start quoting</button>'
+    h += obStep < 4 ? '<button class="btn" data-act="obnext">Next</button>' : '<button class="btn acc" data-act="obfinish">Start quoting</button>'
     return h + '</div></div>'
   }
 
@@ -606,7 +642,7 @@
     if (!f || el.type === 'radio') return
     var v = fieldVal(el)
     if (el.dataset.pct) v = (Number(el.value) || 0) / 100
-    var path = /^(org|rates|products|services)\./.test(f) ? f : 'draft.' + f
+    var path = /^(org|rates|products|services|profile)\./.test(f) ? f : 'draft.' + f
     var realPath = path.replace(/^draft\.(customer|notes|height)/, 'draft.$1')
     setPath(realPath, v)
     var changed = (el.dataset.room || el.dataset.clr) ? confirmSource(realPath.replace(/^draft\./, '')) : false
@@ -658,7 +694,7 @@
     else if (act === 'rmcustom') j.custom.splice(i, 1)
     else if (act === 'addsvc') { state.services.push({ id: newId(), group: 'other', name: 'New service', unit: 'sqm', rate: 20, paint: null, per_coat: false, min_charge: 0, enabled: true }) }
     else if (act === 'rmsvc') { j.custom = j.custom.filter(function (c) { return c.service_id !== state.services[i].id }); state.services.splice(i, 1) }
-    else if (act === 'obnext') obStep++
+    else if (act === 'obnext') { if (obStep === 2) applyProfile(); obStep++ }
     else if (act === 'obback') obStep--
     else if (act === 'obfinish') { state.onboarded = true; tab = 'quote'; window.scrollTo(0, 0) }
     else if (act === 'rmextra') j.extras.splice(i, 1)
