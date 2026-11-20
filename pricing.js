@@ -487,8 +487,8 @@ function describeScope({ job, quantities }) {
 // True if any measurement on the quote came from a preset or a photo and hasn't been
 // confirmed by hand. The customer PDF then says sizes are estimates.
 function hasEstimates(job) {
-  const flagged = (x) => x && (x.source === 'estimate' || x.source === 'photo')
-  return (job.rooms ?? []).some(flagged) || (job.extras ?? []).some(flagged) || flagged(job.exterior)
+  const flagged = (x) => x && (x.source === 'estimate' || x.source === 'photo' || x.source === 'map')
+  return (job.rooms ?? []).some(flagged) || (job.extras ?? []).some(flagged) || (job.custom ?? []).some(flagged) || flagged(job.exterior)
 }
 
 

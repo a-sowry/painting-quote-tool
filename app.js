@@ -15,10 +15,11 @@
     try { var s = localStorage.getItem(KEY); if (s) return JSON.parse(s) } catch (e) {}
     return mem
   }
-  function save() {
+  function localSave() {
     mem = state
     try { localStorage.setItem(KEY, JSON.stringify(state)) } catch (e) {}
   }
+  function save() { localSave(); scheduleSync() }
   function defaults() {
     return {
       org: { name: 'Your Painting Co', abn: '', phone: '', email: '', margin_rate: 0.25, gst_rate: 0.1, quote_prefix: 'Q', next_number: 1001, valid_days: 30, licence: '' },
@@ -40,18 +41,32 @@
     }
   }
   var state = load() || defaults()
-  // make sure older saved data has every field
-  state.rates = Object.assign({}, P.DEFAULT_RATES, state.rates)
-  state.org = Object.assign(defaults().org, state.org)
-  if (!state.draft) state.draft = newDraft()
-  if (!state.draft.job.custom) state.draft.job.custom = []
-  if (!state.services) state.services = P.defaultServices()
-  P.defaultServices().forEach(function (d) { if (!state.services.some(function (x) { return x.id === d.id })) state.services.push(d) })
-  if (state.onboarded === undefined) state.onboarded = false
-  if (!state.profile) state.profile = defaultProfile()
-  if (!state.profile.homes) state.profile.homes = { qld: false, brick: false, unit: false }
+  // make sure older / pulled data has every field
+  function normalise() {
+    state.rates = Object.assign({}, P.DEFAULT_RATES, state.rates)
+    state.org = Object.assign(defaults().org, state.org)
+    if (!state.draft) state.draft = newDraft()
+    if (!state.draft.job.custom) state.draft.job.custom = []
+    if (!state.services) state.services = P.defaultServices()
+    P.defaultServices().forEach(function (d) { if (!state.services.some(function (x) { return x.id === d.id })) state.services.push(d) })
+    if (state.onboarded === undefined) state.onboarded = false
+    if (!state.profile) state.profile = defaultProfile()
+    if (!state.profile.homes) state.profile.homes = { qld: false, brick: false, unit: false }
+    if (!state.products || !state.products.length) state.products = defaults().products
+    if (!state.quotes) state.quotes = []
+    if (!state.pendingQ) state.pendingQ = []
+  }
+  normalise()
   var obStep = 1
-  var tab = state.onboarded ? 'quote' : 'onboard'
+  var cfg = window.PQ_CONFIG || {}
+  var sb = null, cloudUser = null, syncTimer = null, lastPushed = '', syncMsg = '', authMode = 'login', authMsg = '', authBusy = false
+  try {
+    if (cfg.SUPABASE_URL && cfg.SUPABASE_KEY && window.supabase && window.supabase.createClient) {
+      sb = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_KEY, { auth: { persistSession: true, autoRefreshToken: true, storageKey: 'pq-auth', detectSessionInUrl: true } })
+    }
+  } catch (e) { sb = null }
+  var tab = state.onboarded ? 'quote' : (sb && !state.skipAuth ? 'loading' : 'onboard')
+  var BARE_TABS = ['onboard', 'welcome', 'auth', 'recover', 'loading']
 
   // ---------- services ----------
   function enabledMap() { var m = {}; state.services.forEach(function (s) { if (s.builtin) m[s.id] = s.enabled !== false }); return m }
@@ -86,6 +101,194 @@
   }
   var EXTRA_SVC = { wall: 'interior_wall', ceiling: 'ceiling', trim: 'trim', door: 'door', window: 'window', ext_wall: 'ext_wall', ext_trim: 'ext_trim', ext_door: 'ext_door', ext_window: 'ext_window' }
 
+  // ---------- account + sync (Supabase) ----------
+  function settingsBlob() {
+    return { org: state.org, rates: state.rates, products: state.products, services: state.services, profile: state.profile, onboarded: state.onboarded }
+  }
+  function scheduleSync() {
+    if (!sb || !cloudUser) return
+    clearTimeout(syncTimer)
+    syncTimer = setTimeout(function () { syncNow() }, 1200)
+  }
+  async function syncNow() {
+    if (!sb || !cloudUser) return
+    await pushSettings(); await flushQuotes()
+    var el = $('#syncState'); if (el) el.textContent = syncText()
+  }
+  function syncText() {
+    if (!cloudUser) return ''
+    return syncMsg || (state.syncDirty || state.pendingQ.length ? 'Saving to your account…' : 'All saved to your account.')
+  }
+  async function pushSettings() {
+    var blob = JSON.stringify(settingsBlob())
+    if (blob === lastPushed && !state.syncDirty) return
+    try {
+      var r = await sb.from('painters').upsert({ user_id: cloudUser.id, data: JSON.parse(blob), updated_at: new Date().toISOString() }, { onConflict: 'user_id' })
+      if (r.error) throw r.error
+      lastPushed = blob; state.syncDirty = false; syncMsg = ''
+    } catch (e) { state.syncDirty = true; syncMsg = 'Could not reach your account - your changes are saved on this device and will sync later.' }
+    localSave()
+  }
+  function queueQuote(id, op) {
+    state.pendingQ = state.pendingQ.filter(function (x) { return x.id !== id })
+    state.pendingQ.push({ id: id, op: op })
+    localSave(); scheduleSync()
+  }
+  async function flushQuotes() {
+    var todo = state.pendingQ.slice()
+    for (var i = 0; i < todo.length; i++) {
+      var it = todo[i], r
+      try {
+        if (it.op === 'delete') {
+          r = await sb.from('quotes').delete().eq('id', it.id).eq('user_id', cloudUser.id)
+        } else {
+          var rec = state.quotes.filter(function (q) { return q.draft.id === it.id })[0]
+          if (!rec) { state.pendingQ = state.pendingQ.filter(function (x) { return x !== it && x.id !== it.id }); continue }
+          r = await sb.from('quotes').upsert({ id: it.id, user_id: cloudUser.id, number: rec.number, customer_name: rec.customer && rec.customer.name || '', total: rec.total, quote_date: rec.date, draft: rec.draft, updated_at: new Date().toISOString() }, { onConflict: 'user_id,id' })
+        }
+        if (r.error) throw r.error
+        state.pendingQ = state.pendingQ.filter(function (x) { return x.id !== it.id })
+      } catch (e) { syncMsg = 'Could not reach your account - your changes are saved on this device and will sync later.'; break }
+    }
+    if (!state.pendingQ.length && !state.syncDirty) syncMsg = ''
+    localSave()
+  }
+  function applySettings(d) {
+    d = d || {}
+    if (d.org) state.org = Object.assign(defaults().org, d.org)
+    if (d.rates) state.rates = Object.assign({}, P.DEFAULT_RATES, d.rates)
+    if (Array.isArray(d.products) && d.products.length) state.products = d.products
+    if (Array.isArray(d.services)) state.services = d.services
+    if (d.profile) state.profile = d.profile
+    state.onboarded = d.onboarded !== false
+    normalise()
+  }
+  async function afterSignIn(user) {
+    cloudUser = user
+    if (state.owner && state.owner !== user.id) { state = defaults(); normalise() } // someone else's data on this device
+    var wasMine = state.owner === user.id
+    var s
+    try { s = await sb.from('painters').select('data').eq('user_id', user.id) } catch (e) { s = { error: e } }
+    if (s.error) { syncMsg = 'Could not reach your account - working from this device.'; state.owner = user.id; localSave(); goAfterAuth(); return }
+    var row = s.data && s.data[0]
+    state.owner = user.id
+    if (row && !(wasMine && state.syncDirty)) {
+      if (state.pendingQ.length) await flushQuotes()
+      applySettings(row.data)
+      lastPushed = JSON.stringify(settingsBlob())
+      var q
+      try { q = await sb.from('quotes').select('number,customer_name,total,quote_date,draft,updated_at').eq('user_id', user.id).order('updated_at', { ascending: true }) } catch (e) { q = { error: e } }
+      if (!q.error && q.data) {
+        var pendingIds = state.pendingQ.map(function (x) { return x.id })
+        var local = state.quotes.filter(function (x) { return pendingIds.indexOf(x.draft.id) >= 0 })
+        state.quotes = q.data.map(function (r) { return { number: r.number, date: r.quote_date, customer: (r.draft && r.draft.customer) || { name: r.customer_name }, total: Number(r.total), draft: r.draft } })
+        local.forEach(function (l) { var i = state.quotes.findIndex(function (x) { return x.draft.id === l.draft.id }); if (i >= 0) state.quotes[i] = l; else state.quotes.push(l) })
+      }
+    } else if (state.onboarded) {
+      // first sign-in with data already on this device (or unsynced changes): this device's data goes up
+      state.syncDirty = true
+      state.quotes.forEach(function (x) { if (!state.pendingQ.some(function (p) { return p.id === x.draft.id })) state.pendingQ.push({ id: x.draft.id, op: 'upsert' }) })
+    }
+    localSave()
+    await syncNow()
+    goAfterAuth()
+  }
+  function goAfterAuth() {
+    if (BARE_TABS.indexOf(tab) >= 0 && tab !== 'recover') { tab = state.onboarded ? 'quote' : 'onboard'; obStep = 1 }
+    render()
+  }
+  function authError(e) {
+    var m = (e && e.message) || 'Something went wrong. Try again.'
+    if (/Invalid login/i.test(m)) return 'That email or password is not right.'
+    if (/already registered|already been registered/i.test(m)) return 'There is already an account with that email. Try logging in.'
+    if (/Failed to fetch|NetworkError|Load failed/i.test(m)) return 'Could not reach the server. Check your connection and try again.'
+    return m
+  }
+  function redirectUrl() { return location.origin + location.pathname }
+
+  function viewWelcome() {
+    return '<div class="card"><h2>Welcome to PaintQuote</h2><p class="note" style="margin:0 0 12px">Quote painting jobs in minutes. Create a free account to keep your prices and quotes safe and on every device.</p>' +
+      '<div class="row"><button class="btn" data-act="auth-signup">Create account</button><button class="btn sec" data-act="auth-login">Log in</button></div>' +
+      '<p class="note" style="margin:14px 0 0"><button class="link" data-act="skipauth">Try it without an account</button><br>Saved on this device only. You can create an account later and keep what you’ve done.</p></div>'
+  }
+  function viewAuth() {
+    var m = authMode, h = '<div class="card"><h2>' + (m === 'signup' ? 'Create your account' : m === 'forgot' ? 'Reset your password' : 'Log in') + '</h2><form id="authForm" autocomplete="on">'
+    h += '<div class="row"><div><label>Email</label><input id="authEmail" type="email" inputmode="email" autocomplete="email" required></div></div>'
+    if (m !== 'forgot') h += '<div class="row" style="margin-top:8px"><div><label>Password' + (m === 'signup' ? ' (at least 8 characters)' : '') + '</label><input id="authPw" type="password" autocomplete="' + (m === 'signup' ? 'new-password' : 'current-password') + '" required></div></div>'
+    h += '<div id="authMsg" class="note" style="margin:10px 0">' + esc(authMsg) + '</div>'
+    h += '<button class="btn" type="submit"' + (authBusy ? ' disabled' : '') + '>' + (m === 'signup' ? 'Create account' : m === 'forgot' ? 'Send reset link' : 'Log in') + '</button></form>'
+    h += '<p class="note" style="margin:14px 0 0">'
+    if (m === 'login') h += '<button class="link" data-act="auth-signup">Create an account</button> &middot; <button class="link" data-act="auth-forgot">Forgot password?</button>'
+    else h += '<button class="link" data-act="auth-login">Back to log in</button>'
+    h += '</p><p class="note" style="margin:8px 0 0"><button class="link" data-act="authback">' + (state.onboarded ? 'Cancel' : 'Back') + '</button></p></div>'
+    return h
+  }
+  function viewRecover() {
+    return '<div class="card"><h2>Choose a new password</h2><form id="recoverForm"><div class="row"><div><label>New password (at least 8 characters)</label><input id="newPw" type="password" autocomplete="new-password" required></div></div><div id="authMsg" class="note" style="margin:10px 0">' + esc(authMsg) + '</div><button class="btn" type="submit">Save password</button></form></div>'
+  }
+  async function submitAuth() {
+    var email = ($('#authEmail').value || '').trim(), pw = $('#authPw') ? $('#authPw').value : '', msg = $('#authMsg')
+    if (!sb) { msg.textContent = 'Accounts are not switched on for this copy of the app.'; return }
+    if (authMode !== 'forgot' && authMode === 'signup' && pw.length < 8) { msg.textContent = 'Use at least 8 characters for the password.'; return }
+    authBusy = true; msg.textContent = 'One moment…'
+    try {
+      var r
+      if (authMode === 'signup') {
+        r = await sb.auth.signUp({ email: email, password: pw, options: { emailRedirectTo: redirectUrl() } })
+        if (r.error) throw r.error
+        if (!r.data.session) { authMode = 'login'; authMsg = 'Account created. Check your email for a confirmation link, then log in.'; authBusy = false; render(); return }
+      } else if (authMode === 'forgot') {
+        r = await sb.auth.resetPasswordForEmail(email, { redirectTo: redirectUrl() })
+        if (r.error) throw r.error
+        authMode = 'login'; authMsg = 'If there is an account for that email, a reset link is on its way.'; authBusy = false; render(); return
+      } else {
+        r = await sb.auth.signInWithPassword({ email: email, password: pw })
+        if (r.error) throw r.error
+      }
+      authBusy = false // the auth listener takes it from here
+    } catch (e) { authBusy = false; authMsg = authError(e); var m2 = $('#authMsg'); if (m2) m2.textContent = authMsg; var b = $('#authForm button[type=submit]'); if (b) b.disabled = false }
+  }
+  async function submitRecover() {
+    var pw = $('#newPw').value, msg = $('#authMsg')
+    if (pw.length < 8) { msg.textContent = 'Use at least 8 characters.'; return }
+    var r = await sb.auth.updateUser({ password: pw })
+    if (r.error) { msg.textContent = authError(r.error); return }
+    authMsg = ''; tab = state.onboarded ? 'quote' : 'onboard'; toast('Password changed'); render()
+  }
+  async function signOut() {
+    if (!confirm('Log out? Your prices and quotes stay safe in your account.')) return
+    try { await syncNow() } catch (e) {}
+    clearTimeout(syncTimer)
+    try { await sb.auth.signOut() } catch (e) {}
+    cloudUser = null; lastPushed = ''; syncMsg = ''
+    state = defaults(); normalise(); localSave(); tab = 'welcome'; render()
+  }
+  function accountCard() {
+    var h = '<div class="card"><h2>Account</h2>'
+    if (!sb) return h + '<p class="note" style="margin:0">Accounts are not switched on for this copy of the app. Your data is saved on this device only.</p></div>'
+    if (cloudUser) {
+      return h + '<p style="margin:0 0 4px">Logged in as <b>' + esc(cloudUser.email || '') + '</b></p><p class="note" id="syncState" style="margin:0 0 10px">' + esc(syncText()) + '</p><button class="btn sec" data-act="signout">Log out</button></div>'
+    }
+    return h + '<p class="note" style="margin:0 0 10px">Your prices and quotes are saved on this device only. Create a free account to keep them safe and use them on your phone and computer &mdash; what you’ve done so far comes with you.</p><div class="row"><button class="btn" data-act="auth-signup">Create account</button><button class="btn sec" data-act="auth-login">Log in</button></div></div>'
+  }
+
+  // ---------- calling the photo / roof functions ----------
+  async function fnHeaders() {
+    var h = { 'Content-Type': 'application/json', apikey: cfg.SUPABASE_KEY }
+    var code = getCode()
+    if (code) h['x-access-code'] = code
+    if (sb && cloudUser) { try { var s = await sb.auth.getSession(); if (s.data.session) h.Authorization = 'Bearer ' + s.data.session.access_token } catch (e) {} }
+    return h
+  }
+  function canCallFns() { return !!(cloudUser || getCode()) }
+  async function callFn(name, payload) {
+    var res = await fetch(cfg.SUPABASE_URL.replace(/\/$/, '') + '/functions/v1/' + name, { method: 'POST', headers: await fnHeaders(), body: JSON.stringify(payload) })
+    var b = {}; try { b = await res.json() } catch (e) {}
+    if (!res.ok) throw new Error(b.error || 'That did not work (' + res.status + ').')
+    return b
+  }
+  function friendly(e) { return /Failed to fetch|NetworkError|Load failed/i.test(e.message) ? 'Could not reach the server. Check your connection and try again.' : e.message }
+
   // ---------- calculation ----------
   function calc(d) {
     d = d || state.draft
@@ -98,8 +301,12 @@
     $('#nav').querySelectorAll('button').forEach(function (b) { b.classList.toggle('on', b.dataset.tab === tab) })
     var app = $('#app')
     var y = window.scrollY
-    $('.top nav').style.display = tab === 'onboard' ? 'none' : ''
+    $('.top nav').style.display = BARE_TABS.indexOf(tab) >= 0 ? 'none' : ''
     if (tab === 'onboard') app.innerHTML = viewOnboard()
+    else if (tab === 'loading') app.innerHTML = '<div class="card"><div class="empty">Loading&hellip;</div></div>'
+    else if (tab === 'welcome') app.innerHTML = viewWelcome()
+    else if (tab === 'auth') app.innerHTML = viewAuth()
+    else if (tab === 'recover') app.innerHTML = viewRecover()
     else if (tab === 'quote') app.innerHTML = viewQuote()
     else if (tab === 'history') app.innerHTML = viewHistory()
     else if (tab === 'settings') app.innerHTML = viewSettings()
@@ -147,6 +354,7 @@
     state.services.forEach(function (sv) { if (!sv.builtin && sv.enabled) opts += '<option value="s:' + sv.id + '">' + esc(sv.name) + ' (' + unitLabel(sv.unit) + ')</option>' })
     h += '<div class="card"><h2>Other work</h2><p class="note" style="margin:0 0 8px">Feature walls, extra ceilings, fences, repairs &mdash; anything not in a room above.</p>'
     h += '<div class="row"><div style="flex:2 1 220px"><label>Add</label><select id="extraKind">' + opts + '</select></div><div style="flex:0 0 auto"><button class="btn sec" data-act="addextra">Add</button></div></div>'
+    if (cfg.SUPABASE_URL && roofOn()) h += '<div style="margin:10px 0"><button class="btn sec" data-act="roof">Measure roof from the job address</button><div id="roofMsg" class="note" style="margin-top:6px"></div></div>'
     j.extras.forEach(function (x, i) { h += extraCard(x, i) })
     j.custom.forEach(function (c, i) { h += customCard(c, i) })
     h += '</div>'
@@ -214,7 +422,7 @@
     var h = '<div class="card"><h2>Add from a photo</h2>'
     if (!cfg.SUPABASE_URL) return h + '<div class="note">Photo measuring isn\'t switched on yet.</div></div>'
     h += '<p class="note" style="margin:0 0 8px">Take 1&ndash;4 photos. For a room, stand in a corner so both walls and a door are in view. The size is an estimate &mdash; check it before sending the quote.</p>'
-    h += '<div class="row"><div><label>What is it?</label><select id="photoMode">' + modes + '</select></div><div><label>Access code</label><input id="photoCode" type="password" autocomplete="off" value="' + esc(getCode()) + '"></div></div>'
+    h += '<div class="row"><div><label>What is it?</label><select id="photoMode">' + modes + '</select></div>' + (cloudUser ? '' : '<div><label>Access code</label><input id="photoCode" type="password" autocomplete="off" value="' + esc(getCode()) + '"></div>') + '</div>'
     h += '<div style="margin-top:8px"><input id="photoFiles" type="file" accept="image/*" multiple></div>'
     h += '<div style="margin-top:10px"><button class="btn" data-act="analyse">Measure from photo</button></div><div id="photoMsg" class="note" style="margin-top:8px"></div></div>'
     return h
@@ -250,30 +458,41 @@
     }
   }
   function analysePhotos() {
-    var cfg = window.PQ_CONFIG || {}, msg = $('#photoMsg'), btn = $('[data-act="analyse"]')
+    var msg = $('#photoMsg'), btn = $('[data-act="analyse"]')
     var files = Array.prototype.slice.call($('#photoFiles').files || [], 0, 4)
-    var code = $('#photoCode').value.trim(), mode = $('#photoMode').value
+    var mode = $('#photoMode').value
+    var codeEl = $('#photoCode'); if (codeEl && codeEl.value.trim()) { try { localStorage.setItem('pq.code', codeEl.value.trim()) } catch (e) {} }
     if (location.protocol === 'file:') { msg.textContent = 'Photo measuring only works on the hosted site, not a downloaded file.'; return }
     if (!files.length) { msg.textContent = 'Choose or take a photo first.'; return }
-    if (!code) { msg.textContent = 'Enter the access code.'; return }
-    try { localStorage.setItem('pq.code', code) } catch (e) {}
-    btn.disabled = true; msg.textContent = 'Measuring\u2026 this takes a few seconds.'
+    if (!canCallFns()) { msg.textContent = 'Log in (or enter the access code) to measure from photos.'; return }
+    btn.disabled = true; msg.textContent = 'Measuring… this takes a few seconds.'
     Promise.all(files.map(function (f) { return downscale(f) })).then(function (images) {
-      return fetch(cfg.SUPABASE_URL.replace(/\/$/, '') + '/functions/v1/analyse-photo', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', apikey: cfg.SUPABASE_KEY, 'x-access-code': code },
-        body: JSON.stringify({ images: images, mode: mode, ceilingHeight: Number(state.draft.height) || 0 })
-      })
-    }).then(function (res) {
-      return res.json().catch(function () { return {} }).then(function (b) { if (!res.ok) throw new Error(b.error || 'Photo measuring failed (' + res.status + ')'); return b })
+      return callFn('analyse-photo', { images: images, mode: mode, ceilingHeight: Number(state.draft.height) || 0 })
     }).then(function (b) {
       applyEstimate(mode, b.estimate); save(); render()
       var m = $('#photoMsg'); if (m) m.textContent = 'Added. Check the sizes below and adjust if needed.'
       window.scrollTo(0, document.body.scrollHeight * 0.2)
-    }).catch(function (e) {
-      btn.disabled = false
-      msg.textContent = /Failed to fetch|NetworkError|Load failed/i.test(e.message) ? 'Could not reach the server. Check your connection and try again.' : e.message
-    })
+    }).catch(function (e) { btn.disabled = false; msg.textContent = friendly(e) })
+  }
+
+  // ---------- roof from the job address (Google Solar, via the server) ----------
+  function roofOn() { return state.services.some(function (x) { return x.id === 'roof' && x.enabled }) }
+  function measureRoof() {
+    var msg = $('#roofMsg'), btn = $('[data-act="roof"]'), addr = (state.draft.customer.address || '').trim()
+    if (location.protocol === 'file:') { msg.textContent = 'Roof measuring only works on the hosted site.'; return }
+    if (addr.length < 6) { msg.textContent = 'Enter the job address at the top first (street, suburb, state).'; return }
+    if (!canCallFns()) { msg.textContent = 'Log in (or enter the access code in Settings) to measure roofs.'; return }
+    btn.disabled = true; msg.textContent = 'Looking up the roof…'
+    callFn('roof-measure', { address: addr }).then(function (b) {
+      applyRoof(b.roof); save(); render()
+      var m = $('#roofMsg'); if (m) m.textContent = 'Roof added. This is an estimate from aerial data — check it before you quote.'
+    }).catch(function (e) { btn.disabled = false; msg.textContent = friendly(e) })
+  }
+  function applyRoof(r) {
+    var j = state.draft.job, c = j.custom.filter(function (x) { return x.service_id === 'roof' })[0]
+    if (!c) { c = { service_id: 'roof', qty: '' }; j.custom.push(c) }
+    c.qty = Math.round(Number(r.roof_area_m2) || 0); c.source = 'map'
+    c.note = 'Aerial data' + (r.imagery_date ? ' (' + r.imagery_date + ')' : '') + (r.segments ? ', ' + r.segments + ' roof planes' : '') + (r.pitch_deg ? ', average pitch ' + r.pitch_deg + '°' : '') + (r.approximate ? '. The address match was approximate' : '') + (r.address ? '. Found: ' + r.address : '')
   }
 
   function logoBox() {
@@ -420,9 +639,9 @@
   function customCard(c, i) {
     var sv = state.services.filter(function (x) { return x.id === c.service_id })[0]
     if (!sv) return ''
-    var h = '<div class="room"><div class="head"><b style="flex:1">' + esc(sv.name) + '</b><button class="link red" data-act="rmcustom" data-i="' + i + '">&times;</button></div>'
+    var h = '<div class="room"><div class="head"><b style="flex:1">' + esc(sv.name) + '</b>' + (c.source === 'map' ? '<span class="tag photo">from aerial data</span>' : '') + '<button class="link red" data-act="rmcustom" data-i="' + i + '">&times;</button></div>'
     if (sv.unit === 'fixed') return h + '<div class="note">Fixed price ' + money(sv.rate) + '</div></div>'
-    return h + '<div class="row"><div><label>' + esc(unitShort(sv.unit)) + '</label>' + num(sv.unit === 'each' ? 1 : 'any') + 'data-f="job.custom.' + i + '.qty" value="' + esc(c.qty) + '"></div></div></div>'
+    return h + '<div class="row"><div><label>' + esc(unitShort(sv.unit)) + '</label>' + num(sv.unit === 'each' ? 1 : 'any') + 'data-f="job.custom.' + i + '.qty" data-clr="1" value="' + esc(c.qty) + '"></div></div>' + (c.note && c.source === 'map' ? '<div class="sum">' + esc(c.note) + '</div>' : '') + '</div>'
   }
 
   function sendBox() {
@@ -499,15 +718,15 @@
     ['min_charge', 'Minimum labour charge ($)'], ['consumables_pct', 'Consumables (fraction of paint cost)']
   ]
   function viewSettings() {
-    var h = ''
+    var h = accountCard()
     h += '<div class="card"><h2>Your business</h2><div class="row"><div style="flex:2 1 200px"><label>Business name</label><input data-f="org.name" value="' + esc(state.org.name) + '"></div><div><label>ABN</label><input data-f="org.abn" value="' + esc(state.org.abn) + '"></div></div><div class="row" style="margin-top:8px"><div><label>QBCC licence no.</label><input data-f="org.licence" value="' + esc(state.org.licence) + '"></div></div>'
     h += '<div class="row" style="margin-top:8px"><div><label>Phone</label><input data-f="org.phone" value="' + esc(state.org.phone) + '"></div><div><label>Email</label><input data-f="org.email" value="' + esc(state.org.email) + '"></div></div>'
     h += '<div class="row" style="margin-top:8px"><div><label>Margin (%)</label>' + num() + 'data-f="org.margin_rate" data-pct="1" value="' + Math.round(state.org.margin_rate * 1000) / 10 + '"></div><div><label>GST (%)</label>' + num() + 'data-f="org.gst_rate" data-pct="1" value="' + Math.round(state.org.gst_rate * 1000) / 10 + '"></div><div><label>Quote valid (days)</label>' + num(1) + 'data-f="org.valid_days" value="' + esc(state.org.valid_days) + '"></div></div>' + logoBox() + '</div>'
 
     h += '<div class="card"><h2>What you paint</h2><p class="note" style="margin:0 0 4px">Controls the house types listed first and whether the older-timber option shows on quotes. Tick services under Prices.</p>' + profileBox() + '</div>'
     h += '<div class="card"><h2>Quote numbering</h2><div class="row"><div><label>Prefix</label><input data-f="org.quote_prefix" value="' + esc(state.org.quote_prefix) + '"></div><div><label>Next number</label>' + num(1) + 'data-f="org.next_number" value="' + esc(state.org.next_number) + '"></div></div></div>'
-    h += '<div class="card"><h2>Photo measuring</h2><p class="note" style="margin:0 0 8px">The access code is saved on this device so you only enter it once.</p><div class="row"><div><label>Access code</label><input type="password" autocomplete="off" id="settingsCode" value="' + esc(getCode()) + '"></div></div></div>'
-    h += '<div class="card"><h2>Your data</h2><p class="note" style="margin:0 0 8px">Quotes and prices are saved on this device only.</p><button class="btn sec" data-act="reset">Reset everything to demo defaults</button></div>'
+    h += '<div class="card"><h2>Owner access code</h2><p class="note" style="margin:0 0 8px">Optional. Lets you use photo and roof measuring without limits (for trials). Painters with an account don\'t need this.</p><div class="row"><div><label>Access code</label><input type="password" autocomplete="off" id="settingsCode" value="' + esc(getCode()) + '"></div></div></div>'
+    h += '<div class="card"><h2>Your data</h2><p class="note" style="margin:0 0 8px">' + (cloudUser ? 'Your quotes and prices are saved to your account.' : 'Quotes and prices are saved on this device only.') + '</p><button class="btn sec" data-act="reset">Reset everything to demo defaults</button></div>'
     return h
   }
 
@@ -620,7 +839,7 @@
   }
   // typing in a size field means the painter has now confirmed it by hand
   function confirmSource(path) {
-    var m = path.match(/^job\.(rooms|extras)\.(\d+)\./)
+    var m = path.match(/^job\.(rooms|extras|custom)\.(\d+)\./)
     var tgt = null
     if (m) tgt = state.draft.job[m[1]][Number(m[2])]
     else if (/^job\.exterior\./.test(path)) tgt = state.draft.job.exterior
@@ -703,6 +922,13 @@
     else if (act === 'addequip') j.equipment.push({ name: '', cost: '' })
     else if (act === 'rmequip') j.equipment.splice(i, 1)
     else if (act === 'analyse') return analysePhotos()
+    else if (act === 'roof') return measureRoof()
+    else if (act === 'auth-signup') { authMode = 'signup'; authMsg = ''; tab = 'auth'; render(); return }
+    else if (act === 'auth-login') { authMode = 'login'; authMsg = ''; tab = 'auth'; render(); return }
+    else if (act === 'auth-forgot') { authMode = 'forgot'; authMsg = ''; render(); return }
+    else if (act === 'authback') { tab = state.onboarded ? 'settings' : 'welcome'; render(); return }
+    else if (act === 'skipauth') { state.skipAuth = true; localSave(); tab = 'onboard'; obStep = 1; render(); return }
+    else if (act === 'signout') return signOut()
     else if (act === 'share') return sharePdf()
     else if (act === 'download') return downloadPdf()
     else if (act === 'rmlogo') { delete state.org.logo; delete state.org.logo_w; delete state.org.logo_h; delete state.org.logo_type }
@@ -710,10 +936,16 @@
     else if (act === 'pdf') return printQuote()
     else if (act === 'clear') { if (confirm('Start a new blank quote?')) state.draft = newDraft(); else return }
     else if (act === 'openq') { state.draft = JSON.parse(JSON.stringify(state.quotes[i].draft)); if (!state.draft.job.custom) state.draft.job.custom = []; tab = 'quote' }
-    else if (act === 'delq') { if (confirm('Delete this saved quote?')) state.quotes.splice(i, 1); else return }
+    else if (act === 'delq') { if (confirm('Delete this saved quote?')) { var gone = state.quotes.splice(i, 1)[0]; queueQuote(gone.draft.id, 'delete') } else return }
     else if (act === 'rmprod') { if (state.products.filter(function (x) { return x.category === state.products[i].category }).length > 1) { state.products.splice(i, 1) } else { alert('Keep at least one product in each group.'); return } }
     else if (act === 'addprod') { state.products.push({ id: uid(), category: b.dataset.cat, name: 'New product', pack_size_l: 10, pack_price: 100, coverage_m2_per_l: 12, is_default: false }) }
-    else if (act === 'reset') { if (confirm('Reset all prices, paint and saved quotes to the demo defaults?')) { state = defaults(); tab = 'onboard'; obStep = 1 } else return }
+    else if (act === 'reset') {
+      if (confirm('Reset all prices, paint and saved quotes to the demo defaults?' + (cloudUser ? ' This also replaces what is saved in your account.' : ''))) {
+        var ids = state.quotes.map(function (x) { return x.draft.id }), keepOwner = state.owner
+        state = defaults(); normalise(); tab = 'onboard'; obStep = 1
+        if (cloudUser) { state.owner = keepOwner; state.syncDirty = true; ids.forEach(function (id) { state.pendingQ.push({ id: id, op: 'delete' }) }) }
+      } else return
+    }
     else return
     save(); render()
   })
@@ -725,7 +957,7 @@
     var number = existing ? existing.number : state.org.quote_prefix + state.org.next_number++
     var rec = { number: number, date: today(), customer: d.customer, total: q.total, draft: JSON.parse(JSON.stringify(d)) }
     if (existing) state.quotes[state.quotes.indexOf(existing)] = rec; else state.quotes.push(rec)
-    save(); if (!silent) toast('Saved as ' + number)
+    save(); queueQuote(d.id, 'upsert'); if (!silent) toast('Saved as ' + number)
   }
   function today() { return new Date().toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' }) }
   function toast(t) {
@@ -757,6 +989,22 @@
     window.print()
   }
 
+  document.addEventListener('submit', function (e) {
+    if (e.target.id === 'authForm') { e.preventDefault(); submitAuth() }
+    else if (e.target.id === 'recoverForm') { e.preventDefault(); submitRecover() }
+  })
+  window.addEventListener('online', function () { if (cloudUser) syncNow() })
+
   window.__pq = { state: function () { return state }, calc: calc, buildDoc: buildDoc }
   render()
+  if (sb) {
+    sb.auth.onAuthStateChange(function (ev, sess) {
+      if (ev === 'PASSWORD_RECOVERY') { tab = 'recover'; authMsg = ''; setTimeout(render, 0); return }
+      if (sess && sess.user && (ev === 'SIGNED_IN' || ev === 'INITIAL_SESSION')) {
+        if (!cloudUser || cloudUser.id !== sess.user.id) setTimeout(function () { afterSignIn(sess.user) }, 0)
+      } else if (ev === 'INITIAL_SESSION' && !sess) {
+        if (tab === 'loading') { tab = state.skipAuth ? 'onboard' : 'welcome'; setTimeout(render, 0) }
+      }
+    })
+  }
 })()

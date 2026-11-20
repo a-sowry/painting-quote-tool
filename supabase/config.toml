@@ -1,3 +1,6 @@
 # Photo analysis is protected by an access code (ACCESS_CODE secret), not a Supabase login, for now.
 [functions.analyse-photo]
 verify_jwt = false
+
+[functions.roof-measure]
+verify_jwt = false

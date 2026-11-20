@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { validate, codeMatches, buildAnthropicRequest, parseResponse, toolFor } from '../supabase/functions/analyse-photo/core.mjs'
+import { validate, buildAnthropicRequest, parseResponse, toolFor } from '../supabase/functions/analyse-photo/core.mjs'
 
 const img = { mediaType: 'image/jpeg', data: 'x'.repeat(200) }
 test('validate accepts good input and rejects bad', () => {
@@ -11,13 +11,6 @@ test('validate accepts good input and rejects bad', () => {
   assert.match(validate({ mode: 'room', images: [{ mediaType: 'image/gif', data: 'x'.repeat(200) }] }), /JPEG/)
   assert.match(validate({ mode: 'room', images: [{ mediaType: 'image/jpeg', data: 'x'.repeat(3_000_000) }] }), /too large/)
   assert.ok(validate(null))
-})
-test('access code check', () => {
-  assert.equal(codeMatches('abc123', 'abc123'), true)
-  assert.equal(codeMatches('abc124', 'abc123'), false)
-  assert.equal(codeMatches('', 'abc123'), false)
-  assert.equal(codeMatches('anything', ''), false) // unset secret never lets anyone in
-  assert.equal(codeMatches(undefined, 'abc123'), false)
 })
 test('request asks for the tool and includes the photos and ceiling height', () => {
   const r = buildAnthropicRequest({ mode: 'room', images: [img, img], ceilingHeight: 2.7 }, 'm')

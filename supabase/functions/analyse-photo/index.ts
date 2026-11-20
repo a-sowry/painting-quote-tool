@@ -1,7 +1,8 @@
 // Supabase Edge Function: photo -> painting measurements, using Claude's vision API.
 // The Anthropic key lives only here (secret ANTHROPIC_API_KEY), never in the website.
 // Callers must send the shared access code (header x-access-code) that matches the ACCESS_CODE secret.
-import { validate, codeMatches, buildAnthropicRequest, parseResponse } from './core.mjs'
+import { authenticate, checkUsage, recordUsage } from '../_shared/shared.mjs'
+import { validate, buildAnthropicRequest, parseResponse } from './core.mjs'
 
 const cors = {
   'Access-Control-Allow-Origin': '*',
@@ -11,29 +12,24 @@ const cors = {
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { ...cors, 'Content-Type': 'application/json' } })
 
-// Naive per-instance limiter: a speed bump against a leaked code, not a guarantee.
-const hits: number[] = []
-const WINDOW_MS = 10 * 60 * 1000
-const MAX_CALLS = 40
-
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors })
   if (req.method !== 'POST') return json(405, { error: 'POST only' })
 
-  const expected = Deno.env.get('ACCESS_CODE') ?? ''
-  const key = Deno.env.get('ANTHROPIC_API_KEY') ?? ''
-  if (!expected || !key) return json(503, { error: 'Photo analysis is not switched on yet.' })
-  if (!codeMatches(req.headers.get('x-access-code') ?? '', expected)) return json(401, { error: 'Wrong or missing access code' })
+  const env = Deno.env.toObject()
+  if (!env.ANTHROPIC_API_KEY) return json(503, { error: 'Photo analysis is not switched on yet.' })
+  const key = env.ANTHROPIC_API_KEY
+
+  const auth = await authenticate({ headers: req.headers, env })
+  if (!auth.ok) return json(auth.status, { error: auth.error })
 
   let body: any
   try { body = await req.json() } catch { return json(400, { error: 'Bad request' }) }
   const problem = validate(body)
   if (problem) return json(400, { error: problem })
 
-  const now = Date.now()
-  while (hits.length && now - hits[0] > WINDOW_MS) hits.shift()
-  if (hits.length >= MAX_CALLS) return json(429, { error: 'Too many photo analyses - try again in a few minutes.' })
-  hits.push(now)
+  const usage = await checkUsage({ auth, kind: 'photo', env })
+  if (!usage.ok) return json(usage.status, { error: usage.error })
 
   const model = Deno.env.get('ANTHROPIC_MODEL') || 'claude-sonnet-5-5'
   let res: Response
@@ -55,5 +51,6 @@ Deno.serve(async (req: Request) => {
   }
   const estimate = parseResponse(await res.json())
   if (!estimate) return json(502, { error: 'The analysis did not return measurements' })
+  await recordUsage({ auth, kind: 'photo', env })
   return json(200, { estimate, mode: body.mode })
 })

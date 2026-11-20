@@ -70,15 +70,6 @@ export function validate(body) {
   return null
 }
 
-// Constant-time-ish comparison so the access code can't be guessed by timing.
-export function codeMatches(given, expected) {
-  if (typeof given !== 'string' || typeof expected !== 'string' || !expected) return false
-  if (given.length !== expected.length) return false
-  let diff = 0
-  for (let i = 0; i < expected.length; i++) diff |= given.charCodeAt(i) ^ expected.charCodeAt(i)
-  return diff === 0
-}
-
 export function buildAnthropicRequest(body, model) {
   const height = Number(body.ceilingHeight)
   const text =

@@ -1,4 +1,77 @@
-// GENERATED single-file copy of core.mjs + index.ts, for pasting into the Supabase dashboard editor.
+// GENERATED single-file copy of _shared/shared.mjs + analyse-photo/core.mjs + analyse-photo/index.ts.
+// Regenerate with: python3 tools/build-paste.py
+// Shared by every PaintQuote function: who is calling, and are they within their monthly limit?
+// Pure logic with fetch/env passed in, so it can be unit-tested without a network.
+
+function monthStartISO(now = new Date()) {
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString()
+}
+
+function limitFor(kind, env) {
+  const raw = env[kind === 'roof' ? 'MONTHLY_ROOF_LIMIT' : 'MONTHLY_PHOTO_LIMIT']
+  const n = Number(raw)
+  return Number.isFinite(n) && n >= 0 && raw !== undefined && raw !== '' ? n : 30
+}
+
+// Constant-time-ish comparison so the access code can't be guessed by timing.
+function codeMatches(given, expected) {
+  if (typeof given !== 'string' || typeof expected !== 'string' || !expected) return false
+  if (given.length !== expected.length) return false
+  let diff = 0
+  for (let i = 0; i < expected.length; i++) diff |= given.charCodeAt(i) ^ expected.charCodeAt(i)
+  return diff === 0
+}
+
+// A signed-in painter (verified with Supabase) is allowed, and limited. The owner's shared
+// access code is also allowed, unlimited - handy for trying things out. Anyone else is refused.
+async function authenticate({ headers, env, fetchImpl = fetch }) {
+  const get = (k) => (typeof headers.get === 'function' ? headers.get(k) : headers[k]) ?? ''
+  const bearer = get('authorization')
+  const apikey = get('apikey')
+  // The owner's access code (unlimited) is checked first, then a signed-in painter's token (limited).
+  if (codeMatches(get('x-access-code'), env.ACCESS_CODE ?? '')) return { ok: true, kind: 'code' }
+  if (bearer.startsWith('Bearer ') && env.SUPABASE_URL) {
+    try {
+      const res = await fetchImpl(`${env.SUPABASE_URL}/auth/v1/user`, { headers: { apikey, Authorization: bearer } })
+      if (res.ok) {
+        const user = await res.json()
+        if (user?.id) return { ok: true, kind: 'user', userId: user.id }
+      }
+    } catch { /* not a valid session */ }
+  }
+  return { ok: false, status: 401, error: 'Log in to use this.' }
+}
+
+const svc = (env) => ({ apikey: env.SUPABASE_SERVICE_ROLE_KEY, Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}` })
+
+// Call before doing the (paid) work. Returns { ok, used, limit } or { ok:false, status, error }.
+async function checkUsage({ auth, kind, env, fetchImpl = fetch, now = new Date() }) {
+  if (auth.kind !== 'user') return { ok: true } // owner code: unlimited
+  const limit = limitFor(kind, env)
+  const url = `${env.SUPABASE_URL}/rest/v1/usage?select=id&user_id=eq.${auth.userId}&kind=eq.${kind}&created_at=gte.${encodeURIComponent(monthStartISO(now))}`
+  let res
+  try {
+    res = await fetchImpl(url, { headers: { ...svc(env), Prefer: 'count=exact', Range: '0-0' } })
+  } catch { return { ok: false, status: 503, error: 'Could not check your usage - try again.' } }
+  if (!res.ok && res.status !== 206) return { ok: false, status: 503, error: 'Could not check your usage - try again.' }
+  const total = Number((res.headers.get('content-range') ?? '').split('/')[1])
+  const used = Number.isFinite(total) ? total : 0
+  if (used >= limit) return { ok: false, status: 429, error: `You've used all ${limit} of this month's ${kind === 'roof' ? 'roof lookups' : 'photo measurements'}. They reset on the 1st.` }
+  return { ok: true, used, limit }
+}
+
+// Call after the work succeeded, so failures don't use up the allowance.
+async function recordUsage({ auth, kind, env, fetchImpl = fetch }) {
+  if (auth.kind !== 'user') return
+  try {
+    await fetchImpl(`${env.SUPABASE_URL}/rest/v1/usage`, {
+      method: 'POST',
+      headers: { ...svc(env), 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify({ user_id: auth.userId, kind }),
+    })
+  } catch { /* never fail the painter's request over bookkeeping */ }
+}
+
 // Pure logic for photo analysis (no network, no Deno APIs) so it can be unit-tested in Node.
 const MAX_IMAGES = 4
 const MAX_IMAGE_CHARS = 2_500_000 // ~1.9 MB of base64 per photo (the app downsizes well below this)
@@ -71,15 +144,6 @@ function validate(body) {
   return null
 }
 
-// Constant-time-ish comparison so the access code can't be guessed by timing.
-function codeMatches(given, expected) {
-  if (typeof given !== 'string' || typeof expected !== 'string' || !expected) return false
-  if (given.length !== expected.length) return false
-  let diff = 0
-  for (let i = 0; i < expected.length; i++) diff |= given.charCodeAt(i) ^ expected.charCodeAt(i)
-  return diff === 0
-}
-
 function buildAnthropicRequest(body, model) {
   const height = Number(body.ceilingHeight)
   const text =
@@ -120,29 +184,24 @@ const cors = {
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { ...cors, 'Content-Type': 'application/json' } })
 
-// Naive per-instance limiter: a speed bump against a leaked code, not a guarantee.
-const hits: number[] = []
-const WINDOW_MS = 10 * 60 * 1000
-const MAX_CALLS = 40
-
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors })
   if (req.method !== 'POST') return json(405, { error: 'POST only' })
 
-  const expected = Deno.env.get('ACCESS_CODE') ?? ''
-  const key = Deno.env.get('ANTHROPIC_API_KEY') ?? ''
-  if (!expected || !key) return json(503, { error: 'Photo analysis is not switched on yet.' })
-  if (!codeMatches(req.headers.get('x-access-code') ?? '', expected)) return json(401, { error: 'Wrong or missing access code' })
+  const env = Deno.env.toObject()
+  if (!env.ANTHROPIC_API_KEY) return json(503, { error: 'Photo analysis is not switched on yet.' })
+  const key = env.ANTHROPIC_API_KEY
+
+  const auth = await authenticate({ headers: req.headers, env })
+  if (!auth.ok) return json(auth.status, { error: auth.error })
 
   let body: any
   try { body = await req.json() } catch { return json(400, { error: 'Bad request' }) }
   const problem = validate(body)
   if (problem) return json(400, { error: problem })
 
-  const now = Date.now()
-  while (hits.length && now - hits[0] > WINDOW_MS) hits.shift()
-  if (hits.length >= MAX_CALLS) return json(429, { error: 'Too many photo analyses - try again in a few minutes.' })
-  hits.push(now)
+  const usage = await checkUsage({ auth, kind: 'photo', env })
+  if (!usage.ok) return json(usage.status, { error: usage.error })
 
   const model = Deno.env.get('ANTHROPIC_MODEL') || 'claude-sonnet-5-5'
   let res: Response
@@ -164,5 +223,6 @@ Deno.serve(async (req: Request) => {
   }
   const estimate = parseResponse(await res.json())
   if (!estimate) return json(502, { error: 'The analysis did not return measurements' })
+  await recordUsage({ auth, kind: 'photo', env })
   return json(200, { estimate, mode: body.mode })
 })
