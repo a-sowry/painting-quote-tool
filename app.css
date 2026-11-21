@@ -60,11 +60,11 @@ td,th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left}td.r,t
 nav{display:flex;flex-wrap:nowrap}nav button{padding:8px 8px;white-space:nowrap}
 .bar .btn{padding:10px 10px;font-size:14px}.bar .tot small{white-space:nowrap}
 
-@media(max-width:400px){nav button{padding:8px 5px;font-size:14px}.brand{font-size:15px}.demo{display:none}}
+@media(max-width:400px){nav button{padding:8px 5px;font-size:14px}.brand{font-size:15px}}
 
 /* header: brand on top, tabs full width underneath (fits any phone) */
 .top{flex-wrap:wrap;gap:6px 0;padding-bottom:6px}
 .top .brand{flex:1 1 100%}
 .top nav{flex:1 1 100%;display:flex;gap:2px}
 .top nav button{flex:1 1 0;text-align:center;padding:9px 2px;font-size:15px}
-.demo{display:none}
+.demo{display:inline-block;text-transform:uppercase;letter-spacing:.5px;font-weight:700}

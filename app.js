@@ -206,15 +206,33 @@
   }
   function redirectUrl() { return location.origin + location.pathname }
 
+  // ---------- demo notice + install help ----------
+  function demoNotice() {
+    return '<div class="card"><h2>About this demo</h2><div class="note" style="line-height:1.5">' +
+      '<p style="margin:0 0 8px"><b>PaintQuote is a demo.</b> It is an early trial version, provided as is. It may contain mistakes, change without notice, or be switched off, and saved data could be lost. Keep your own copy of anything important.</p>' +
+      '<p style="margin:0 0 8px"><b>Estimates only.</b> Starting prices are ballpark figures, not market rates or advice. Sizes taken from photos or aerial roof data are estimates and can be wrong. Always check measurements and prices yourself before you give a customer a quote.</p>' +
+      '<p style="margin:0 0 8px"><b>You are responsible for your quotes and your work.</b> A quote made here is not a contract and is not legal, tax, licensing or insurance advice. You must make sure you hold the right licence (for example a QBCC licence in Queensland where one is required), insurance and safety practices, and that your quotes meet GST, Australian Consumer Law and any lead-paint or other rules that apply to the job.</p>' +
+      '<p style="margin:0 0 8px"><b>Liability.</b> To the extent the law allows, PaintQuote and its creator are not liable for any loss or damage from using the app or relying on its figures. Nothing here limits rights you have under the Australian Consumer Law that cannot be excluded.</p>' +
+      '<p style="margin:0"><b>Your information.</b> If you create an account, your email, prices, quotes and the customer details you type in are stored with our database provider (Supabase). Photos you measure are sent to an AI service (Anthropic) to be analysed and are not saved in your account. Job addresses you look up are sent to Google to find the roof. You are responsible for having the right to enter your customers’ details. We do not sell your information.</p>' +
+      '</div></div>'
+  }
+  function installHelp() {
+    return '<div class="card"><h2>Add it to your home screen</h2><div class="note" style="line-height:1.5">' +
+      '<p style="margin:0 0 6px"><b>iPhone (Safari):</b> open this page in Safari, tap the Share button (the square with an arrow), scroll down and tap <b>Add to Home Screen</b>, then <b>Add</b>.</p>' +
+      '<p style="margin:0"><b>Android (Chrome):</b> tap the ⋮ menu, then <b>Add to Home screen</b> (or <b>Install app</b>), then <b>Add</b>.</p>' +
+      '</div></div>'
+  }
+
   function viewWelcome() {
     return '<div class="card"><h2>Welcome to PaintQuote</h2><p class="note" style="margin:0 0 12px">Quote painting jobs in minutes. Create a free account to keep your prices and quotes safe and on every device.</p>' +
       '<div class="row"><button class="btn" data-act="auth-signup">Create account</button><button class="btn sec" data-act="auth-login">Log in</button></div>' +
-      '<p class="note" style="margin:14px 0 0"><button class="link" data-act="skipauth">Try it without an account</button><br>Saved on this device only. You can create an account later and keep what you’ve done.</p></div>'
+      '<p class="note" style="margin:14px 0 0"><button class="link" data-act="skipauth">Try it without an account</button><br>Saved on this device only. You can create an account later and keep what you’ve done.</p></div>' + installHelp() + demoNotice()
   }
   function viewAuth() {
     var m = authMode, h = '<div class="card"><h2>' + (m === 'signup' ? 'Create your account' : m === 'forgot' ? 'Reset your password' : 'Log in') + '</h2><form id="authForm" autocomplete="on">'
     h += '<div class="row"><div><label>Email</label><input id="authEmail" type="email" inputmode="email" autocomplete="email" required></div></div>'
     if (m !== 'forgot') h += '<div class="row" style="margin-top:8px"><div><label>Password' + (m === 'signup' ? ' (at least 8 characters)' : '') + '</label><input id="authPw" type="password" autocomplete="' + (m === 'signup' ? 'new-password' : 'current-password') + '" required></div></div>'
+    if (m === 'signup') h += '<label class="note" style="display:flex;gap:8px;align-items:flex-start;margin-top:10px"><input id="authAgree" type="checkbox" style="width:auto;margin-top:3px"><span>I understand PaintQuote is a demo, its figures are estimates I must check, and I am responsible for my own quotes and work.</span></label>'
     h += '<div id="authMsg" class="note" style="margin:10px 0">' + esc(authMsg) + '</div>'
     h += '<button class="btn" type="submit"' + (authBusy ? ' disabled' : '') + '>' + (m === 'signup' ? 'Create account' : m === 'forgot' ? 'Send reset link' : 'Log in') + '</button></form>'
     h += '<p class="note" style="margin:14px 0 0">'
@@ -230,6 +248,7 @@
     var email = ($('#authEmail').value || '').trim(), pw = $('#authPw') ? $('#authPw').value : '', msg = $('#authMsg')
     if (!sb) { msg.textContent = 'Accounts are not switched on for this copy of the app.'; return }
     if (authMode !== 'forgot' && authMode === 'signup' && pw.length < 8) { msg.textContent = 'Use at least 8 characters for the password.'; return }
+    if (authMode === 'signup' && !($('#authAgree') && $('#authAgree').checked)) { msg.textContent = 'Please tick the box to confirm you understand this is a demo.'; return }
     authBusy = true; msg.textContent = 'One moment…'
     try {
       var r
@@ -727,6 +746,7 @@
     h += '<div class="card"><h2>Quote numbering</h2><div class="row"><div><label>Prefix</label><input data-f="org.quote_prefix" value="' + esc(state.org.quote_prefix) + '"></div><div><label>Next number</label>' + num(1) + 'data-f="org.next_number" value="' + esc(state.org.next_number) + '"></div></div></div>'
     h += '<div class="card"><h2>Owner access code</h2><p class="note" style="margin:0 0 8px">Optional. Lets you use photo and roof measuring without limits (for trials). Painters with an account don\'t need this.</p><div class="row"><div><label>Access code</label><input type="password" autocomplete="off" id="settingsCode" value="' + esc(getCode()) + '"></div></div></div>'
     h += '<div class="card"><h2>Your data</h2><p class="note" style="margin:0 0 8px">' + (cloudUser ? 'Your quotes and prices are saved to your account.' : 'Quotes and prices are saved on this device only.') + '</p><button class="btn sec" data-act="reset">Reset everything to demo defaults</button></div>'
+    h += installHelp() + demoNotice()
     return h
   }
 
